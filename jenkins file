@@ -1,0 +1,41 @@
+pipeline {
+    agent any
+    environment {
+        REPO_URL = "github.com/Prathmesh2806/Fabric-Automation.git"
+        GITHUB_CREDENTIALS_ID = 'github-creds'
+    }
+    stages {
+        stage('Checkout & Validation') {
+            steps {
+                script {
+                    echo "Checking out Dev branch..."
+                    git branch: 'dev', credentialsId: "${GITHUB_CREDENTIALS_ID}", url: "https://${REPO_URL}"
+                    
+                    echo "Validating Reports..."
+                    def checkA = sh(script: "ls -R Customer-A | grep '.Report' || echo 'NotFound'", returnStdout: true).trim()
+                    def checkB = sh(script: "ls -R Customer-B | grep '.Report' || echo 'NotFound'", returnStdout: true).trim()
+                    
+                    if (checkA == 'NotFound' && checkB == 'NotFound') {
+                        error "❌ Validation Failed: Report sapdla nahi!"
+                    }
+                    echo "✅ Validation Successful!"
+                }
+            }
+        }
+        stage('Push to Main') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: "${env.GITHUB_CREDENTIALS_ID}", passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                        sh """
+                            git config user.email "jenkins-bot@example.com"
+                            git config user.name "Jenkins Automation"
+                            git checkout main || git checkout -b main origin/main
+                            git merge origin/dev --no-ff -m "Validated and Merged by Jenkins"
+                            git push https://${GIT_USERNAME}:${GIT_PASSWORD}@${REPO_URL} main
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
