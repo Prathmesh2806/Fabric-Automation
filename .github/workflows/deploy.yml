@@ -1,57 +1,33 @@
 name: Fabric Deployment Trigger
 on:
   push:
-    branches: [ main ]
-    paths:
-      - 'Customer-A/**'
-      - 'Customer-B/**'
+    tags:
+      - 'deploy-a-*'  # Jeva Jenkins 'deploy-a-1' sarka tag push karel teva he suru hoil
 
 jobs:
-  detect_and_deploy:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Detect Changed Customer
-        id: filter
-        run: |
-          if git diff --name-only HEAD^ HEAD | grep -q '^Customer-A/'; then
-            echo "customer=Customer-A" >> $GITHUB_OUTPUT
-            echo "workspace_id=09426049-3a4b-4063-b35b-43928a03b21a" >> $GITHUB_OUTPUT
-            echo "pipeline_id=2c6e8fa5-112c-4e07-8254-4f5ab8ed2f75" >> $GITHUB_OUTPUT
-          elif git diff --name-only HEAD^ HEAD | grep -q '^Customer-B/'; then
-            echo "customer=Customer-B" >> $GITHUB_OUTPUT
-            echo "workspace_id=TUMCHA_B_WORKSPACE_ID" >> $GITHUB_OUTPUT
-            echo "pipeline_id=TUMCHA_B_PIPELINE_ID" >> $GITHUB_OUTPUT
-          fi
-
+      - uses: actions/checkout@v4
+      
       - name: Get Fabric Token
-        if: steps.filter.outputs.customer != ''
-        id: get_token
+        id: token
         run: |
-          TOKEN=$(curl -s -X POST https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=client_credentials" \
-            -d "client_id=${{ secrets.CLIENT_ID }}" \
-            -d "client_secret=${{ secrets.CLIENT_SECRET }}" \
-            -d "resource=https://analysis.windows.net/powerbi/api" | jq -r .access_token)
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          T=$(curl -s -X POST https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/token \
+            -d "grant_type=client_credentials&client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&resource=https://analysis.windows.net/powerbi/api" | jq -r .access_token)
+          echo "val=$T" >> $GITHUB_OUTPUT
 
-      - name: Sync Fabric DEV Workspace
-        if: steps.filter.outputs.customer != ''
+      - name: Sync & Deploy
         run: |
-          curl -X POST https://api.fabric.microsoft.com/v1/workspaces/${{ steps.filter.outputs.workspace_id }}/git/updateFromGit \
-          -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
+          # 1. Sync Workspace DEV-A
+          curl -X POST "https://api.fabric.microsoft.com/v1/workspaces/09426049-3a4b-4063-b35b-43928a03b21a/git/updateFromGit" \
+          -H "Authorization: Bearer ${{ steps.token.outputs.val }}" \
+          -H "Content-Type: application/json" -d '{"remoteCommitHash": "${{ github.sha }}"}'
+          
+          sleep 20
+          
+          # 2. Trigger Pipeline to QA-A
+          curl -X POST "https://api.powerbi.com/v1.0/myorg/pipelines/2c6e8fa5-112c-4e07-8254-4f5ab8ed2f75/deploy" \
+          -H "Authorization: Bearer ${{ steps.token.outputs.val }}" \
           -H "Content-Type: application/json" \
-          -d "{\"remoteCommitHash\": \"${{ github.sha }}\"}"
-
-      - name: Trigger Fabric Deployment Pipeline
-        if: steps.filter.outputs.customer != ''
-        run: |
-          curl -X POST https://api.powerbi.com/v1.0/myorg/pipelines/${{ steps.filter.outputs.pipeline_id }}/deploy \
-          -H "Authorization: Bearer ${{ steps.get_token.outputs.token }}" \
-          -H "Content-Type: application/json" \
-          -d "{\"sourceStageOrder\": 0, \"isSourceJustNowUpdated\": true, \"note\": \"Auto-deploy for ${{ steps.filter.outputs.customer }}\"}"
+          -d '{"sourceStageOrder": 0, "isSourceJustNowUpdated": true, "note": "Auto-deploy via Jenkins"}'
