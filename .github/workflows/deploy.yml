@@ -3,7 +3,7 @@ name: Fabric Deployment Trigger
 on:
   push:
     tags:
-      - 'deploy-a-*'  # Jenkins ne tag push kela ki he automatic suru hoil
+      - 'deploy-a-*'
 
 jobs:
   deploy:
@@ -15,7 +15,6 @@ jobs:
       - name: Get Fabric Token
         id: token
         run: |
-          # Azure AD (Microsoft Entra ID) madhun access token ghenyasathi
           T=$(curl -s -X POST https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/token \
             -d "grant_type=client_credentials&client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&resource=https://analysis.windows.net/powerbi/api" | jq -r .access_token)
           echo "val=$T" >> $GITHUB_OUTPUT
@@ -23,18 +22,17 @@ jobs:
       - name: Sync & Deploy
         run: |
           echo "Step 1: Syncing DEV-A Workspace from Git..."
-          # Fabric API sathi 'FromWorkspace' kiva 'FromGit' ya exact strings lagtat
+          # conflictResolution kadhun takla aahe, karan Fabric API to accept karat nahiye.
           curl -X POST "https://api.fabric.microsoft.com/v1/workspaces/09426049-3a4b-4063-b35b-43928a03b21a/git/updateFromGit" \
           -H "Authorization: Bearer ${{ steps.token.outputs.val }}" \
           -H "Content-Type: application/json" \
-          -d "{\"remoteCommitHash\": \"${{ github.sha }}\", \"conflictResolution\": \"FromWorkspace\"}"
+          -d "{\"remoteCommitHash\": \"${{ github.sha }}\"}"
           
           echo "Waiting 60 seconds for Fabric to process internal sync..."
           sleep 60
           
           echo "Step 2: Triggering Fabric Deployment Pipeline (DEV to QA)..."
-          # DEV stage (0) madhun QA stage madhe report pathvnyasathi
           curl -X POST "https://api.powerbi.com/v1.0/myorg/pipelines/2c6e8fa5-112c-4e07-8254-4f5ab8ed2f75/deploy" \
           -H "Authorization: Bearer ${{ steps.token.outputs.val }}" \
           -H "Content-Type: application/json" \
-          -d '{"sourceStageOrder": 0, "isSourceJustNowUpdated": true, "note": "Auto-deploy triggered by Jenkins Tag"}'
+          -d '{"sourceStageOrder": 0, "isSourceJustNowUpdated": true, "note": "Auto-deploy via Jenkins Tag"}'
