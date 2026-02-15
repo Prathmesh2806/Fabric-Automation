@@ -1,1 +1,13 @@
-
+name: Validate Fabric Report
+on:
+  push:
+    branches: [ dev ]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Report Structure
+        run: |
+          echo "Checking Customer-A folder..."
+          ls -R Customer-A | grep .Report
