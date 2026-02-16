@@ -1,3 +1,5 @@
+import groovy.transform.NonCPS
+
 pipeline {
     agent any
     environment {
@@ -25,26 +27,25 @@ pipeline {
                 }
             }
         }
-        stage('Cleanup & Get Dataset ID') {
+        stage('Cleanup') {
             steps {
                 script {
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' सापडला नाही!" }
+                    if (!ds) { error "❌ Dataset sapḍalā nāhī!" }
                     env.TARGET_DATASET_ID = ds.id
 
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
-                        echo "🧹 जुना रिपोर्ट हटवला. नवीन बनवण्याची तयारी सुरू..."
-                        sleep 10
+                        sleep 5
                     }
                 }
             }
         }
-        stage('Deploy & Track Operation') {
+        stage('Deploy & Track') {
             steps {
                 script {
                     def reportPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report/report.json"
@@ -53,40 +54,45 @@ pipeline {
                     def createPayload = [
                         displayName: env.REPORT_NAME,
                         type: "Report",
-                        definition: [
-                            parts: [[path: "report.json", payload: reportContent, payloadType: "InlineBase64"]]
-                        ],
+                        definition: [parts: [[path: "report.json", payload: reportContent, payloadType: "InlineBase64"]]],
                         relations: [[id: env.TARGET_DATASET_ID, type: "SemanticModel"]]
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    // POST Request - capturing headers to get Operation Location
                     def responseHeaders = sh(script: "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json", returnStdout: true)
-                    echo "Full Response Headers:\n${responseHeaders}"
-
-                    def locationHeader = (responseHeaders =~ /location: (.*)/)
-                    if (locationHeader) {
-                        def opUrl = locationHeader[0][1].trim()
-                        echo "🔍 Operation Track करतोय: ${opUrl}"
-                        
-                        // Wait and Poll status
-                        for(int i=0; i<6; i++) {
-                            echo "⏳ तपासत आहे (Attempt ${i+1})..."
-                            sleep 15
-                            def opStatus = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                            echo "Current Status: ${opStatus}"
-                            if (opStatus.contains("Succeeded")) {
-                                echo "✅ रिपोर्ट यशस्वीरित्या बनला!"
-                                break
-                            } else if (opStatus.contains("Failed")) {
-                                error "❌ Fabric Operation Failed! नक्की काय चुकलंय ते वरच्या स्टेटसमध्ये बघा."
+                    
+                    // Call the NonCPS function to extract URL safely
+                    String opUrl = getOperationUrl(responseHeaders)
+                    
+                    if (opUrl) {
+                        echo "🔍 Operation Track kartōy: ${opUrl}"
+                        for(int i=0; i<5; i++) {
+                            echo "⏳ Check karūn pāhtōy... (Attempt ${i+1})"
+                            sleep 20
+                            def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                            echo "Status: ${statusRaw}"
+                            if (statusRaw.contains("Succeeded")) {
+                                echo "✅ SUCCESS! Report UI madhe dhisala pahije."
+                                return
+                            } else if (statusRaw.contains("Failed")) {
+                                error "❌ Fabric Failure: ${statusRaw}"
                             }
                         }
                     } else {
-                        echo "⚠️ Operation URL सापडली नाही. डायरेक्ट लिस्ट चेक करा."
+                        echo "⚠️ Operation URL sapḍalī nāhī, 30 sec thāmbūn Workspace check karā."
+                        sleep 30
                     }
                 }
             }
         }
     }
+}
+
+@NonCPS
+def getOperationUrl(String headers) {
+    def matcher = (headers =~ /location: (.*)/)
+    if (matcher) {
+        return matcher[0][1].trim()
+    }
+    return null
 }
