@@ -2,20 +2,17 @@ pipeline {
     agent any
     
     triggers {
-        githubPush() // GitHub webhook trigger sathi
+        githubPush() // GitHub webhook trigger
     }
 
     environment {
         REPO_URL = "github.com/Prathmesh2806/Fabric-Automation.git"
         GITHUB_CREDENTIALS_ID = 'github-creds'
         
-        // Jenkins Credentials (Secret Text) madhun values uchat aahe
+        // Jenkins Credentials (Secret Text)
         TENANT_ID     = credentials('fabric-tenant-id')
         CLIENT_ID     = credentials('fabric-client-id')
         CLIENT_SECRET = credentials('fabric-client-secret')
-        
-        WORKSPACE_ID  = '09426049-3a4b-4063-b35b-43928a03b21a'
-        PIPELINE_ID   = '2c6e8fa5-112c-4e07-8254-4f5ab8ed2f75'
     }
 
     stages {
@@ -24,8 +21,13 @@ pipeline {
                 git branch: 'dev', credentialsId: "${GITHUB_CREDENTIALS_ID}", url: "https://${REPO_URL}"
                 echo "✅ Code checked out from Dev branch."
                 
-                echo "Validating Report Structure for Customer-A..."
-                sh "ls -R Customer-A | grep '.Report' || (echo '❌ Error: Report file missing!' && exit 1)"
+                script {
+                    // Check karne kontya folder madhe change jhala (e.g., Customer-A)
+                    env.CHANGED_FOLDER = sh(script: "git diff --name-only HEAD~1 | cut -d/ -f1 | head -1", returnStdout: true).trim()
+                }
+                
+                echo "Validating structure for: ${env.CHANGED_FOLDER}"
+                sh "ls -R ${env.CHANGED_FOLDER} | grep '.Report' || (echo '❌ Error: Report folder missing!' && exit 1)"
                 echo "✅ Validation Successful!"
             }
         }
@@ -33,50 +35,86 @@ pipeline {
         stage('Get Fabric Token') {
             steps {
                 script {
-                    echo "Fetching Azure AD Access Token..."
+                    echo "Fetching Fabric Access Token..."
+                    // Fabric API sathi .default scope garjecha aahe
                     def tokenResponse = sh(script: """
-                        curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/token \
-                        -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&resource=https://analysis.windows.net/powerbi/api"
+                        curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token \
+                        -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=https://api.fabric.microsoft.com/.default"
                     """, returnStdout: true).trim()
                     
-                    env.FABRIC_TOKEN = sh(script: "echo '${tokenResponse}' | jq -r .access_token", returnStdout: true).trim()
+                    def tokenJson = readJSON text: tokenResponse
+                    env.FABRIC_TOKEN = tokenJson.access_token
+                    echo "✅ Token Generated!"
                 }
             }
         }
 
-        stage('Fabric Sync (DEV-A)') {
+        stage('Identify & Resolve IDs') {
             steps {
-                echo "Triggering Fabric Workspace Sync..."
                 script {
-                    def commitHash = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
-                    sh """
-                        curl -X POST "https://api.fabric.microsoft.com/v1/workspaces/${WORKSPACE_ID}/git/updateFromGit" \
+                    // 1. Mapping: Customer-A -> QA-A
+                    def suffix = env.CHANGED_FOLDER.split("-")[1] 
+                    def targetWSName = "QA-${suffix}"
+                    echo "Targeting Workspace: ${targetWSName}"
+
+                    // 2. Resolve Workspace ID via API
+                    def wsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
+                    def workspaces = readJSON text: wsResponse
+                    def targetWS = workspaces.value.find { it.displayName == targetWSName }
+
+                    if (!targetWS) { error "❌ Workspace ${targetWSName} not found!" }
+                    env.TARGET_WS_ID = targetWS.id
+                    echo "✅ Found Workspace ID: ${env.TARGET_WS_ID}"
+
+                    // 3. Resolve Report (Item) ID
+                    def itemResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
+                    def items = readJSON text: itemResponse
+                    def targetItem = items.value.find { it.displayName == "Sales_Report_${suffix}" }
+                    
+                    if (!targetItem) { error "❌ Report Sales_Report_${suffix} not found in ${targetWSName}!" }
+                    env.TARGET_ITEM_ID = targetItem.id
+                    echo "✅ Found Item ID: ${env.TARGET_ITEM_ID}"
+                }
+            }
+        }
+
+        stage('API Deployment (Update Definition)') {
+            steps {
+                script {
+                    echo "Encoding files and pushing to Fabric..."
+                    
+                    def suffix = env.CHANGED_FOLDER.split("-")[1]
+                    def reportFolder = "${env.CHANGED_FOLDER}/Sales_Report_${suffix}.Report"
+                    
+                    // Base64 conversion
+                    def reportJsonBase64 = sh(script: "base64 -w 0 ${reportFolder}/report.json", returnStdout: true).trim()
+                    def pbirBase64 = sh(script: "base64 -w 0 ${reportFolder}/definition.pbir", returnStdout: true).trim()
+
+                    // Update Item Definition API Call
+                    def apiStatus = sh(script: """
+                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition" \
                         -H "Authorization: Bearer ${env.FABRIC_TOKEN}" \
                         -H "Content-Type: application/json" \
-                        -d '{"remoteCommitHash": "${commitHash}"}'
-                    """
-                }
-                echo "Waiting 60 seconds for Fabric to sync..."
-                sleep 60
-            }
-        }
+                        -d '{
+                            "parts": [
+                                { "path": "report.json", "payload": "${reportJsonBase64}", "payloadType": "InlineBase64" },
+                                { "path": "definition.pbir", "payload": "${pbirBase64}", "payloadType": "InlineBase64" }
+                            ]
+                        }'
+                    """, returnStdout: true).trim()
 
-        stage('Fabric Deploy (QA-A)') {
-            steps {
-                echo "Triggering Deployment: DEV -> QA..."
-                sh """
-                    curl -X POST "https://api.powerbi.com/v1.0/myorg/pipelines/${PIPELINE_ID}/deploy" \
-                    -H "Authorization: Bearer ${env.FABRIC_TOKEN}" \
-                    -H "Content-Type: application/json" \
-                    -d '{"sourceStageOrder": 0, "isSourceJustNowUpdated": true, "note": "Auto-deploy via Jenkinsfile Build ${BUILD_NUMBER}"}'
-                """
-                echo "✅ Deployment Successful!"
+                    if (apiStatus == "200" || apiStatus == "202") {
+                        echo "🚀 Deployment Successful to QA Workspace!"
+                    } else {
+                        error "❌ Fabric API failed with status: ${apiStatus}"
+                    }
+                }
             }
         }
     }
 
     post {
-        success { echo "🎉 Sagle kaam Jenkins ne fattesik jhale!" }
-        failure { echo "❌ Kahiतरी chukle aahe, logs check kara." }
+        success { echo "🎉 CI/CD Process Completed Successfully!" }
+        failure { echo "❌ Pipeline Failed. Please check logs." }
     }
 }
