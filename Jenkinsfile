@@ -10,14 +10,10 @@ pipeline {
             steps {
                 git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
                 script {
-                    def changedFolder = sh(script: "git diff --name-only HEAD~1 | grep / | cut -d/ -f1 | head -1", returnStdout: true).trim()
-                    env.DETECTED_FOLDER = changedFolder ?: "Customer-A" 
-                    
-                    if (env.DETECTED_FOLDER == "Customer-A") {
-                        env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-                        env.REPORT_NAME = "Sales_Report_A"
-                        env.DATASET_NAME = "Sales_Model_A"
-                    }
+                    env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
+                    env.REPORT_NAME = "Sales_Report_A"
+                    env.DATASET_NAME = "Sales_Model_A"
+                    env.DETECTED_FOLDER = "Customer-A"
                 }
             }
         }
@@ -29,26 +25,26 @@ pipeline {
                 }
             }
         }
-        stage('Identify & Cleanup') {
+        stage('Cleanup & Get Dataset ID') {
             steps {
                 script {
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset sapḍalā nāhī!" }
+                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' सापडला नाही!" }
                     env.TARGET_DATASET_ID = ds.id
 
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
-                        echo "🧹 Junā rēpōrṭ sapḍalā, tyālā kāḍhūñ takatōy..."
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
+                        echo "🧹 जुना रिपोर्ट हटवला. नवीन बनवण्याची तयारी सुरू..."
                         sleep 10
                     }
                 }
             }
         }
-        stage('Final Deploy (Fresh Create)') {
+        stage('Deploy & Track Operation') {
             steps {
                 script {
                     def reportPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report/report.json"
@@ -62,28 +58,32 @@ pipeline {
                         ],
                         relations: [[id: env.TARGET_DATASET_ID, type: "SemanticModel"]]
                     ]
-                    
-                    writeJSON file: 'final_payload.json', json: createPayload
-                    echo "🚀 Fresh rēpōrṭ banvat āhē (HTTP 202 Accepted logic)..."
-                    sh "curl -v -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @final_payload.json"
-                }
-            }
-        }
-        stage('Verify & Sync') {
-            steps {
-                script {
-                    echo "⏳ Fabric Sync sathi 40 seconds thāmbat āhē..."
-                    sleep 40
-                    
-                    def checkResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                    def checkJson = readJSON text: checkResponse
-                    def reportExists = checkJson.value.find { it.displayName == env.REPORT_NAME }
-                    
-                    if (reportExists) {
-                        echo "✅ SUCCESS: Report '${env.REPORT_NAME}' SAPDLA! Workspace madhe disla pahije aatā."
-                        echo "Report ID: ${reportExists.id}"
+                    writeJSON file: 'payload.json', json: createPayload
+
+                    // POST Request - capturing headers to get Operation Location
+                    def responseHeaders = sh(script: "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json", returnStdout: true)
+                    echo "Full Response Headers:\n${responseHeaders}"
+
+                    def locationHeader = (responseHeaders =~ /location: (.*)/)
+                    if (locationHeader) {
+                        def opUrl = locationHeader[0][1].trim()
+                        echo "🔍 Operation Track करतोय: ${opUrl}"
+                        
+                        // Wait and Poll status
+                        for(int i=0; i<6; i++) {
+                            echo "⏳ तपासत आहे (Attempt ${i+1})..."
+                            sleep 15
+                            def opStatus = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                            echo "Current Status: ${opStatus}"
+                            if (opStatus.contains("Succeeded")) {
+                                echo "✅ रिपोर्ट यशस्वीरित्या बनला!"
+                                break
+                            } else if (opStatus.contains("Failed")) {
+                                error "❌ Fabric Operation Failed! नक्की काय चुकलंय ते वरच्या स्टेटसमध्ये बघा."
+                            }
+                        }
                     } else {
-                        echo "❌ ERROR: 40 sec nantar pan report sapdla nahi. UI refresh karun check kara."
+                        echo "⚠️ Operation URL सापडली नाही. डायरेक्ट लिस्ट चेक करा."
                     }
                 }
             }
