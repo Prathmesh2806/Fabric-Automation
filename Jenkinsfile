@@ -1,5 +1,3 @@
-import groovy.transform.NonCPS
-
 pipeline {
     agent any
     environment {
@@ -34,18 +32,19 @@ pipeline {
                     def itemsJson = readJSON text: itemsResponse
                     
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset sapḍalā nāhī!" }
+                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
 
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
-                        sleep 5
+                        echo "🧹 June items clean kele..."
+                        sleep 10
                     }
                 }
             }
         }
-        stage('Deploy & Track') {
+        stage('Deploy & Status Check') {
             steps {
                 script {
                     def reportPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report/report.json"
@@ -59,40 +58,31 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    def responseHeaders = sh(script: "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json", returnStdout: true)
-                    
-                    // Call the NonCPS function to extract URL safely
-                    String opUrl = getOperationUrl(responseHeaders)
+                    // Capture location header using grep to avoid Regex Serialization issues
+                    def opUrl = sh(script: "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
                     
                     if (opUrl) {
-                        echo "🔍 Operation Track kartōy: ${opUrl}"
-                        for(int i=0; i<5; i++) {
-                            echo "⏳ Check karūn pāhtōy... (Attempt ${i+1})"
+                        echo "🔍 Tracking Operation: ${opUrl}"
+                        // Loop for checking status
+                        for(int i=0; i<6; i++) {
+                            echo "⏳ Attempt ${i+1}: Waiting for Fabric to finish..."
                             sleep 20
-                            def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                            echo "Status: ${statusRaw}"
-                            if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Report UI madhe dhisala pahije."
+                            def statusJson = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                            echo "Current Status: ${statusJson}"
+                            
+                            if (statusJson.contains("Succeeded")) {
+                                echo "✅ EXCELLENT! Report '${env.REPORT_NAME}' banla aahe."
                                 return
-                            } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Failure: ${statusRaw}"
+                            } else if (statusJson.contains("Failed")) {
+                                error "❌ Fabric error dila: ${statusJson}"
                             }
                         }
                     } else {
-                        echo "⚠️ Operation URL sapḍalī nāhī, 30 sec thāmbūn Workspace check karā."
+                        echo "⚠️ Operation URL sapdli nahi, manually check kara."
                         sleep 30
                     }
                 }
             }
         }
     }
-}
-
-@NonCPS
-def getOperationUrl(String headers) {
-    def matcher = (headers =~ /location: (.*)/)
-    if (matcher) {
-        return matcher[0][1].trim()
-    }
-    return null
 }
