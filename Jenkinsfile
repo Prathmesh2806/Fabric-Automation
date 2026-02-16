@@ -48,12 +48,12 @@ pipeline {
             steps {
                 script {
                     def suffix = env.CHANGED_FOLDER.split("-")[1] 
-                    def targetWSName = "QA-${suffix}"
+                    env.TARGET_WS_NAME = "QA-${suffix}" // Env variable madhe set kela
                     
                     def wsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
                     def workspaces = readJSON text: wsResponse
-                    def targetWS = workspaces.value.find { it.displayName == targetWSName }
-                    if (!targetWS) { error "❌ Workspace ${targetWSName} not found!" }
+                    def targetWS = workspaces.value.find { it.displayName == env.TARGET_WS_NAME }
+                    if (!targetWS) { error "❌ Workspace ${env.TARGET_WS_NAME} not found!" }
                     env.TARGET_WS_ID = targetWS.id
 
                     def itemResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
@@ -86,11 +86,14 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: payload
 
+                    // HTTP Code check karnyacha sudharit marg
                     def apiStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition' -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' -H 'Content-Type: application/json' -d @payload.json", returnStdout: true).trim()
 
                     if (apiStatus == "200" || apiStatus == "202") {
-                        echo "🚀 Deployment Successful to ${targetWSName}!"
+                        echo "🚀 Deployment Successful to ${env.TARGET_WS_NAME}!"
                     } else {
+                        // Error detail baghnyasathi ek extra call (optional logging)
+                        sh "curl -v -X POST 'https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition' -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
                         error "❌ Fabric API failed with status: ${apiStatus}"
                     }
                 }
