@@ -36,7 +36,7 @@
           "z": 0.00
         },
         {
-          "config": "{\"name\":\"68f7b144aecb6a90284e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":290,\"width\":280,\"height\":280,\"z\":1000,\"tabOrder\":1000}}],\"singleVisual\":{\"visualType\":\"textbox\",\"drillFilterOtherVisuals\":true,\"objects\":{\"general\":[{\"properties\":{\"paragraphs\":[{\"textRuns\":[{\"value\":\"\\\"Testing Deployment Sync - DEV-A\\\"\"}]},{\"textRuns\":[{\"value\":\"\"}]},{\"textRuns\":[{\"value\":\"FINAL API VALIDATION \"}]}]}}]}}}",
+          "config": "{\"name\":\"68f7b144aecb6a90284e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":290,\"width\":280,\"height\":280,\"z\":1000,\"tabOrder\":1000}}],\"singleVisual\":{\"visualType\":\"textbox\",\"drillFilterOtherVisuals\":true,\"objects\":{\"general\":[{\"properties\":{\"paragraphs\":[{\"textRuns\":[{\"value\":\"\\\"Testing Deployment Sync - DEV-A\\\"\"}]},{\"textRuns\":[{\"value\":\"\"}]},{\"textRuns\":[{\"value\":\"FINAL API VALIDATION - RETRY 1 \"}]}]}}]}}}",
           "filters": "[]",
           "height": 280.00,
           "width": 280.00,
