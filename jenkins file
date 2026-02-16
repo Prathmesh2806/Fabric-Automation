@@ -1,5 +1,9 @@
 pipeline {
     agent any
+    
+    triggers {
+        githubPush() // GitHub webhook trigger sathi
+    }
 
     environment {
         REPO_URL = "github.com/Prathmesh2806/Fabric-Automation.git"
