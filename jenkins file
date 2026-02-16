@@ -1,51 +1,78 @@
-name: Fabric Deployment Trigger
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'Customer-A/**'
-      - 'Customer-B/**'
+pipeline {
+    agent any
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
+    environment {
+        REPO_URL = "github.com/Prathmesh2806/Fabric-Automation.git"
+        GITHUB_CREDENTIALS_ID = 'github-creds'
+        
+        // Jenkins Credentials (Secret Text) madhun values uchat aahe
+        TENANT_ID     = credentials('fabric-tenant-id')
+        CLIENT_ID     = credentials('fabric-client-id')
+        CLIENT_SECRET = credentials('fabric-client-secret')
+        
+        WORKSPACE_ID  = '09426049-3a4b-4063-b35b-43928a03b21a'
+        PIPELINE_ID   = '2c6e8fa5-112c-4e07-8254-4f5ab8ed2f75'
+    }
 
-      - name: Detect Customer and Set IDs
-        id: filter
-        run: |
-          if git diff --name-only HEAD^ HEAD | grep -q '^Customer-A/'; then
-            echo "cust=A" >> $GITHUB_OUTPUT
-            echo "ws_id=09426049-3a4b-4063-b35b-43928a03b21a" >> $GITHUB_OUTPUT
-            echo "pipe_id=2c6e8fa5-112c-4e07-8254-4f5ab8ed2f75" >> $GITHUB_OUTPUT
-          elif git diff --name-only HEAD^ HEAD | grep -q '^Customer-B/'; then
-            echo "cust=B" >> $GITHUB_OUTPUT
-            echo "ws_id=TUMCHA_B_WS_ID" >> $GITHUB_OUTPUT
-            echo "pipe_id=TUMCHA_B_PIPE_ID" >> $GITHUB_OUTPUT
-          fi
+    stages {
+        stage('Checkout & Validate') {
+            steps {
+                git branch: 'dev', credentialsId: "${GITHUB_CREDENTIALS_ID}", url: "https://${REPO_URL}"
+                echo "✅ Code checked out from Dev branch."
+                
+                echo "Validating Report Structure for Customer-A..."
+                sh "ls -R Customer-A | grep '.Report' || (echo '❌ Error: Report file missing!' && exit 1)"
+                echo "✅ Validation Successful!"
+            }
+        }
 
-      - name: Get Fabric Token
-        id: token
-        run: |
-          T=$(curl -s -X POST https://login.microsoftonline.com/${{ secrets.TENANT_ID }}/oauth2/token \
-            -d "grant_type=client_credentials&client_id=${{ secrets.CLIENT_ID }}&client_secret=${{ secrets.CLIENT_SECRET }}&resource=https://analysis.windows.net/powerbi/api" | jq -r .access_token)
-          echo "val=$T" >> $GITHUB_OUTPUT
+        stage('Get Fabric Token') {
+            steps {
+                script {
+                    echo "Fetching Azure AD Access Token..."
+                    def tokenResponse = sh(script: """
+                        curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/token \
+                        -d "grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&resource=https://analysis.windows.net/powerbi/api"
+                    """, returnStdout: true).trim()
+                    
+                    env.FABRIC_TOKEN = sh(script: "echo '${tokenResponse}' | jq -r .access_token", returnStdout: true).trim()
+                }
+            }
+        }
 
-      - name: Sync & Deploy
-        if: steps.filter.outputs.cust != ''
-        run: |
-          # 1. Sync Workspace
-          curl -X POST "https://api.fabric.microsoft.com/v1/workspaces/${{ steps.filter.outputs.ws_id }}/git/updateFromGit" \
-          -H "Authorization: Bearer ${{ steps.token.outputs.val }}" \
-          -H "Content-Type: application/json" -d '{"remoteCommitHash": "${{ github.sha }}"}'
-          
-          sleep 20 # Wait for sync
-          
-          # 2. Trigger Pipeline (QA)
-          curl -X POST "https://api.powerbi.com/v1.0/myorg/pipelines/${{ steps.filter.outputs.pipe_id }}/deploy" \
-          -H "Authorization: Bearer ${{ steps.token.outputs.val }}" \
-          -H "Content-Type: application/json" \
-          -d '{"sourceStageOrder": 0, "isSourceJustNowUpdated": true, "note": "Auto-deploy"}'
+        stage('Fabric Sync (DEV-A)') {
+            steps {
+                echo "Triggering Fabric Workspace Sync..."
+                script {
+                    def commitHash = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
+                    sh """
+                        curl -X POST "https://api.fabric.microsoft.com/v1/workspaces/${WORKSPACE_ID}/git/updateFromGit" \
+                        -H "Authorization: Bearer ${env.FABRIC_TOKEN}" \
+                        -H "Content-Type: application/json" \
+                        -d '{"remoteCommitHash": "${commitHash}"}'
+                    """
+                }
+                echo "Waiting 60 seconds for Fabric to sync..."
+                sleep 60
+            }
+        }
+
+        stage('Fabric Deploy (QA-A)') {
+            steps {
+                echo "Triggering Deployment: DEV -> QA..."
+                sh """
+                    curl -X POST "https://api.powerbi.com/v1.0/myorg/pipelines/${PIPELINE_ID}/deploy" \
+                    -H "Authorization: Bearer ${env.FABRIC_TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -d '{"sourceStageOrder": 0, "isSourceJustNowUpdated": true, "note": "Auto-deploy via Jenkinsfile Build ${BUILD_NUMBER}"}'
+                """
+                echo "✅ Deployment Successful!"
+            }
+        }
+    }
+
+    post {
+        success { echo "🎉 Sagle kaam Jenkins ne fattesik jhale!" }
+        failure { echo "❌ Kahiतरी chukle aahe, logs check kara." }
+    }
+}
