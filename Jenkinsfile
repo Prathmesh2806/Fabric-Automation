@@ -35,17 +35,15 @@ pipeline {
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     
-                    // Dataset ID shōdhā
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset sapḍalā nāhī! Workspace madhē '${env.DATASET_NAME}' nāv check karā." }
+                    if (!ds) { error "❌ Dataset sapḍalā nāhī!" }
                     env.TARGET_DATASET_ID = ds.id
 
-                    // Jar rēpōrṭ astitvāt asēl, tar tyālā DELETE karā
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
-                        echo "🧹 Junā rēpōrṭ sapḍalā (${rep.id}), tyālā kāḍhūñ takatōy..."
-                        sh "curl -s -v -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
-                        sleep 10 // Sync hoṇyāsāṭhī 10 seconds thāmbā
+                        echo "🧹 Junā rēpōrṭ sapḍalā, tyālā kāḍhūñ takatōy..."
+                        sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
+                        sleep 10
                     }
                 }
             }
@@ -66,10 +64,27 @@ pipeline {
                     ]
                     
                     writeJSON file: 'final_payload.json', json: createPayload
-                    echo "🚀 Fresh rēpōrṭ banvat āhē (with Relations)..."
-                    
-                    // Verbose mode (-v) jyamuḷē pūrṇa API response dhisēl
+                    echo "🚀 Fresh rēpōrṭ banvat āhē (HTTP 202 Accepted logic)..."
                     sh "curl -v -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @final_payload.json"
+                }
+            }
+        }
+        stage('Verify & Sync') {
+            steps {
+                script {
+                    echo "⏳ Fabric Sync sathi 40 seconds thāmbat āhē..."
+                    sleep 40
+                    
+                    def checkResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                    def checkJson = readJSON text: checkResponse
+                    def reportExists = checkJson.value.find { it.displayName == env.REPORT_NAME }
+                    
+                    if (reportExists) {
+                        echo "✅ SUCCESS: Report '${env.REPORT_NAME}' SAPDLA! Workspace madhe disla pahije aatā."
+                        echo "Report ID: ${reportExists.id}"
+                    } else {
+                        echo "❌ ERROR: 40 sec nantar pan report sapdla nahi. UI refresh karun check kara."
+                    }
                 }
             }
         }
