@@ -1,107 +1,98 @@
 pipeline {
     agent any
-    
-    triggers {
-        githubPush() 
-    }
 
     environment {
-        REPO_URL = "github.com/Prathmesh2806/Fabric-Automation.git"
-        GITHUB_CREDENTIALS_ID = 'github-creds'
-        TENANT_ID     = credentials('fabric-tenant-id')
         CLIENT_ID     = credentials('fabric-client-id')
         CLIENT_SECRET = credentials('fabric-client-secret')
+        TENANT_ID     = credentials('fabric-tenant-id')
     }
 
     stages {
         stage('Checkout & Detect Change') {
             steps {
-                git branch: 'dev', credentialsId: "${GITHUB_CREDENTIALS_ID}", url: "https://${REPO_URL}"
+                git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
                 script {
-                    def folder = sh(script: "git diff --name-only HEAD~1 | grep '/' | cut -d/ -f1 | head -1", returnStdout: true).trim()
-                    if (!folder || folder == "Jenkinsfile") {
-                        env.SKIP_DEPLOY = "true"
-                        echo "⚠️ No customer folder changes detected."
+                    // Detect changed folder (Customer-A or Customer-B)
+                    def changedFolder = sh(script: "git diff --name-only HEAD~1 | grep / | cut -d/ -f1 | head -1", returnStdout: true).trim()
+                    env.DETECTED_FOLDER = changedFolder
+                    
+                    // Workspace ID Mapping Logic
+                    if (env.DETECTED_FOLDER == "Customer-A") {
+                        env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6" // QA-A
+                        env.REPORT_NAME = "Sales_Report_A"
+                    } else if (env.DETECTED_FOLDER == "Customer-B") {
+                        env.TARGET_WORKSPACE_ID = "tujha-qa-b-workspace-id-ithe-tak" // QA-B ID
+                        env.REPORT_NAME = "Sales_Report_B"
                     } else {
-                        env.CHANGED_FOLDER = folder
-                        env.SKIP_DEPLOY = "false"
-                        echo "Detected change in folder: ${env.CHANGED_FOLDER}"
+                        error "❌ Unknown folder detected: ${env.DETECTED_FOLDER}. Pipeline stopped."
                     }
+                    
+                    echo "📁 Detected Folder: ${env.DETECTED_FOLDER}"
+                    echo "🎯 Target Workspace: ${env.TARGET_WORKSPACE_ID}"
                 }
             }
         }
 
         stage('Validate & Get Token') {
-            when { environment name: 'SKIP_DEPLOY', value: 'false' }
             steps {
                 script {
-                    def tokenResponse = sh(script: "curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token -d 'grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=https://api.fabric.microsoft.com/.default'", returnStdout: true).trim()
+                    def tokenResponse = sh(script: "curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token -d 'grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=https://api.fabric.microsoft.com/.default'", returnStdout: true)
                     def tokenJson = readJSON text: tokenResponse
-                    env.FABRIC_TOKEN = tokenJson.access_token
+                    env.TOKEN = tokenJson.access_token
                     echo "✅ Token generated!"
                 }
             }
         }
 
         stage('Identify Target IDs') {
-            when { environment name: 'SKIP_DEPLOY', value: 'false' }
             steps {
                 script {
-                    def suffix = env.CHANGED_FOLDER.split("-")[1] 
-                    env.TARGET_WS_NAME = "QA-${suffix}" 
+                    def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                    def itemsJson = readJSON text: itemsResponse
                     
-                    def wsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
-                    def workspaces = readJSON text: wsResponse
-                    def targetWS = workspaces.value.find { it.displayName == env.TARGET_WS_NAME }
-                    if (!targetWS) { error "❌ Workspace ${env.TARGET_WS_NAME} not found!" }
-                    env.TARGET_WS_ID = targetWS.id
-
-                    def itemResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
-                    def items = readJSON text: itemResponse
-                    def reportName = "Sales_Report_${suffix}"
-                    def targetItem = items.value.find { it.displayName == reportName }
-                    if (!targetItem) { error "❌ Item ${reportName} not found!" }
-                    env.TARGET_ITEM_ID = targetItem.id
+                    def targetItem = itemsJson.value.find { it.displayName == env.REPORT_NAME }
+                    
+                    if (targetItem) {
+                        env.TARGET_ITEM_ID = targetItem.id
+                        env.REPORT_EXISTS = "true"
+                        echo "✅ Existing Report Found! ID: ${env.TARGET_ITEM_ID}"
+                    } else {
+                        env.REPORT_EXISTS = "false"
+                        echo "⚠️ Report not found. New one will be created."
+                    }
                 }
             }
         }
 
         stage('Push to QA (API)') {
-            when { environment name: 'SKIP_DEPLOY', value: 'false' }
             steps {
                 script {
-                    def suffix = env.CHANGED_FOLDER.split("-")[1]
-                    def reportFolder = "${env.CHANGED_FOLDER}/Sales_Report_${suffix}.Report"
+                    // Dynamic path based on folder and report name
+                    def reportPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report/report.json"
+                    def reportContent = sh(script: "base64 -w 0 ${reportPath}", returnStdout: true).trim()
                     
-                    // Fakt report.json chi base64 value ghetli (Visuals sathi)
-                    def rptBase64 = sh(script: "base64 -w 0 ${reportFolder}/report.json", returnStdout: true).trim()
-
-                    // Payload simplified: PBIR file kaadhli aahe jyamule dataset cha confusion honar nahi
                     def payload = [
                         definition: [
-                            parts: [
-                                [ path: "report.json", payload: rptBase64, payloadType: "InlineBase64" ]
-                            ]
+                            parts: [[path: "report.json", payload: reportContent, payloadType: "InlineBase64"]]
                         ]
                     ]
                     writeJSON file: 'payload.json', json: payload
 
-                    // Final API Call
-                    def apiStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition' -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' -H 'Content-Type: application/json' -d @payload.json", returnStdout: true).trim()
-
-                    if (apiStatus == "200" || apiStatus == "202") {
-                        echo "🚀 Deployment Successful to ${env.TARGET_WS_NAME}! Status: ${apiStatus}"
+                    if (env.REPORT_EXISTS == "true") {
+                        echo "🚀 Updating ${env.REPORT_NAME} in ${env.DETECTED_FOLDER}..."
+                        sh "curl -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
                     } else {
-                        // Error check karnyasaathi detail log
-                        sh "curl -v -X POST 'https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition' -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
-                        error "❌ Fabric API failed with status: ${apiStatus}"
+                        echo "🚀 Creating ${env.REPORT_NAME} in ${env.DETECTED_FOLDER}..."
+                        def createPayload = [
+                            displayName: env.REPORT_NAME,
+                            type: "Report",
+                            definition: payload.definition
+                        ]
+                        writeJSON file: 'create_payload.json', json: createPayload
+                        sh "curl -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @create_payload.json"
                     }
                 }
             }
         }
-    }
-    post {
-        success { echo "🎉 Success!" }
-        failure { echo "❌ Failed!" }
     }
 }
