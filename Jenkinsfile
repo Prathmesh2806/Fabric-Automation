@@ -48,7 +48,7 @@ pipeline {
             steps {
                 script {
                     def suffix = env.CHANGED_FOLDER.split("-")[1] 
-                    env.TARGET_WS_NAME = "QA-${suffix}" // Env variable madhe set kela
+                    env.TARGET_WS_NAME = "QA-${suffix}" 
                     
                     def wsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces -H 'Authorization: Bearer ${env.FABRIC_TOKEN}'", returnStdout: true).trim()
                     def workspaces = readJSON text: wsResponse
@@ -73,26 +73,26 @@ pipeline {
                     def suffix = env.CHANGED_FOLDER.split("-")[1]
                     def reportFolder = "${env.CHANGED_FOLDER}/Sales_Report_${suffix}.Report"
                     
+                    // Fakt report.json chi base64 value ghetli (Visuals sathi)
                     def rptBase64 = sh(script: "base64 -w 0 ${reportFolder}/report.json", returnStdout: true).trim()
-                    def pbirBase64 = sh(script: "base64 -w 0 ${reportFolder}/definition.pbir", returnStdout: true).trim()
 
+                    // Payload simplified: PBIR file kaadhli aahe jyamule dataset cha confusion honar nahi
                     def payload = [
                         definition: [
                             parts: [
-                                [ path: "report.json", payload: rptBase64, payloadType: "InlineBase64" ],
-                                [ path: "definition.pbir", payload: pbirBase64, payloadType: "InlineBase64" ]
+                                [ path: "report.json", payload: rptBase64, payloadType: "InlineBase64" ]
                             ]
                         ]
                     ]
                     writeJSON file: 'payload.json', json: payload
 
-                    // HTTP Code check karnyacha sudharit marg
+                    // Final API Call
                     def apiStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition' -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' -H 'Content-Type: application/json' -d @payload.json", returnStdout: true).trim()
 
                     if (apiStatus == "200" || apiStatus == "202") {
-                        echo "🚀 Deployment Successful to ${env.TARGET_WS_NAME}!"
+                        echo "🚀 Deployment Successful to ${env.TARGET_WS_NAME}! Status: ${apiStatus}"
                     } else {
-                        // Error detail baghnyasathi ek extra call (optional logging)
+                        // Error check karnyasaathi detail log
                         sh "curl -v -X POST 'https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WS_ID}/items/${env.TARGET_ITEM_ID}/updateDefinition' -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
                         error "❌ Fabric API failed with status: ${apiStatus}"
                     }
