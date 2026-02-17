@@ -25,42 +25,37 @@ pipeline {
                 }
             }
         }
-        stage('Cleanup') {
+        stage('Cleanup & Prep') {
             steps {
                 script {
+                    // QA Workspace madhla Dataset ID shodha (Screenshot madhe distoye to)
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     
-                    // Dataset GUID shodha
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
+                    if (!ds) { error "❌ Workspace madhe '${env.DATASET_NAME}' sapdla nahi. Screenshot madhe asun pan API ka dakhavat nahiye te check kara." }
                     env.TARGET_DATASET_ID = ds.id
-
-                    // Juna report asel tar kadha
-                    def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
-                    if (rep) {
-                        sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
-                        sleep 10
-                    }
+                    echo "🎯 Target Dataset GUID: ${env.TARGET_DATASET_ID}"
                 }
             }
         }
-        stage('Deploy') {
+        stage('Deploy Report') {
             steps {
                 script {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // SOLUTION: Vapara 'connectionString' with 'semanticModelId' 
-                    // Ha format Fabric API la saglyat safe vato.
+                    // FIXED SCHEMA: All mandatory properties included
                     def pbirJson = """{
   "version": "1.0",
   "datasetReference": {
     "byConnection": {
-      "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/TargetWorkspace;Initial Catalog=${env.DATASET_NAME};semanticModelId=${env.TARGET_DATASET_ID}",
-      "pbiServiceModelId": null,
-      "connectionType": "pbiServiceXml",
-      "name": "EntityDataSource"
+      "connectionString": null,
+      "pbiServiceModelId": "${env.TARGET_DATASET_ID}",
+      "pbiModelVirtualServerName": null,
+      "pbiModelDatabaseName": null,
+      "name": "EntityDataSource",
+      "connectionType": "pbiServiceXml"
     }
   }
 }"""
@@ -87,18 +82,18 @@ pipeline {
                     
                     if (opUrl) {
                         for(int i=0; i<10; i++) {
-                            echo "⏳ Final Monitoring Attempt ${i+1}..."
+                            echo "⏳ Monitoring Attempt ${i+1}..."
                             sleep 20
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Deployment Complete."
+                                echo "✅ SUCCESS! Report Deployed and Linked to ${env.DATASET_NAME}."
                                 return
                             } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Deployment Failed: ${statusRaw}"
+                                error "❌ Fabric Error: ${statusRaw}"
                             }
                         }
                     } else {
-                        error "❌ Operation URL missing."
+                        error "❌ Operation URL missing in Response."
                     }
                 }
             }
