@@ -35,23 +35,17 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    // 1. Get Workspace Items
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
-                    // 2. Build Multi-Part TMDL Payload
                     def parts = []
-                    
-                    // Root file
                     parts << [
                         path: "definition.pbism", 
                         payload: sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim(), 
                         payloadType: "InlineBase64"
                     ]
                     
-                    // Recursive find for all .tmdl files (model, tables, expressions, etc.)
                     def tmdlFiles = sh(script: "find ${env.MODEL_FOLDER}/definition -name '*.tmdl'", returnStdout: true).split()
-                    
                     tmdlFiles.each { filePath ->
                         def relativePath = filePath.substring(filePath.indexOf("definition/"))
                         parts << [
@@ -59,7 +53,6 @@ pipeline {
                             payload: sh(script: "base64 -w 0 ${filePath}", returnStdout: true).trim(), 
                             payloadType: "InlineBase64"
                         ]
-                        echo "📦 Included: ${relativePath}"
                     }
 
                     def modelPayload = [
@@ -69,7 +62,6 @@ pipeline {
                     ]
                     writeJSON file: 'model_payload.json', json: modelPayload
 
-                    // 3. Update or Create
                     def apiUrl = existingModel ? 
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingModel.id}/updateDefinition" : 
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
@@ -88,11 +80,14 @@ pipeline {
                     def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
                     def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
 
-                    // Create dynamic .pbir
+                    // CRITICAL FIX: The new mandatory .pbir schema
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
+                                "connectionString": null,
+                                "pbiServiceModelId": "${modelId}",
+                                "pbiModelVirtualServerName": "sobe_wowvirtualserver",
                                 "pbiModelDatabaseName": "${modelId}",
                                 "name": "EntityDataSource",
                                 "connectionType": "pbiServiceXml"
@@ -117,7 +112,7 @@ pipeline {
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingReport.id}/updateDefinition" : 
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
                     
-                    echo "🚀 Deploying Report..."
+                    echo "🚀 Deploying Report with NEW schema..."
                     fabricPoll(apiUrl, 'report_payload.json')
                 }
             }
@@ -131,7 +126,6 @@ pipeline {
     }
 }
 
-// Helper function placed OUTSIDE the pipeline block
 def fabricPoll(apiUrl, payloadFile) {
     def responseHeaders = sh(script: "curl -i -s -X POST ${apiUrl} -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @${payloadFile}", returnStdout: true)
     def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
@@ -147,9 +141,8 @@ def fabricPoll(apiUrl, payloadFile) {
             } else if (statusJson.status == "Failed") {
                 error "❌ Fabric API Error: ${statusRaw}"
             }
-            echo "⏳ Polling Fabric API..."
         }
     } else {
-        error "❌ API failed to start. Headers: ${responseHeaders}"
+        error "❌ API failed to start."
     }
 }
