@@ -11,10 +11,7 @@ pipeline {
         stage('Checkout & Config') {
             steps {
                 script {
-                    // GitHub repo checkout
                     git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
-                    
-                    // Configuration - Adjust these as per your project
                     env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
                     env.REPORT_NAME = "Sales_Report_A"
                     env.DATASET_NAME = "Sales_Model_A"
@@ -35,15 +32,10 @@ pipeline {
         stage('Prep Target Dataset') {
             steps {
                 script {
-                    // Find the Dataset GUID in the target workspace
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    
-                    if (!ds) { 
-                        error "❌ Dataset '${env.DATASET_NAME}' not found in target workspace!" 
-                    }
-                    
+                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' not found!" }
                     env.TARGET_DATASET_ID = ds.id
                     echo "🎯 Target Dataset GUID: ${env.TARGET_DATASET_ID}"
                 }
@@ -54,13 +46,60 @@ pipeline {
             steps {
                 script {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
-                    
-                    // 1. report.json base64
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // 2. definition.pbir (Binding logic)
-                    // Fixed: Moving GUID to pbiModelDatabaseName as per Fabric Error errorCode: InvalidConnectionInformation
                     def pbirJson = """{
                       "version": "1.0",
                       "datasetReference": {
-                        "byConnection":
+                        "byConnection": {
+                          "connectionString": null,
+                          "pbiServiceModelId": null,
+                          "pbiModelVirtualServerName": null,
+                          "pbiModelDatabaseName": "${env.TARGET_DATASET_ID}",
+                          "name": "EntityDataSource",
+                          "connectionType": "pbiServiceXml"
+                        }
+                      }
+                    }"""
+                    
+                    writeFile file: 'definition.pbir', text: pbirJson
+                    def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
+                    
+                    def createPayload = [
+                        displayName: env.REPORT_NAME,
+                        type: "Report",
+                        definition: [
+                            parts: [
+                                [path: "report.json", payload: reportContent, payloadType: "InlineBase64"],
+                                [path: "definition.pbir", payload: pbirBase64, payloadType: "InlineBase64"]
+                            ]
+                        ]
+                    ]
+                    writeJSON file: 'payload.json', json: createPayload
+
+                    def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
+                    def responseHeaders = sh(script: curlCmd, returnStdout: true)
+                    
+                    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
+                    
+                    if (opUrl && opUrl != "null") {
+                        echo "🔗 Monitoring Operation: ${opUrl}"
+                        for(int i=0; i<15; i++) {
+                            echo "⏳ Monitoring (Attempt \${i+1})..."
+                            sleep 20
+                            def statusRaw = sh(script: "curl -s -X GET '\${opUrl}' -H 'Authorization: Bearer \${env.TOKEN}'", returnStdout: true)
+                            if (statusRaw.contains("Succeeded")) {
+                                echo "✅ SUCCESS!"
+                                return
+                            } else if (statusRaw.contains("Failed")) {
+                                error "❌ Fabric Error: \${statusRaw}"
+                            }
+                        }
+                    } else {
+                        error "❌ No Location Header found. API Response: \${responseHeaders}"
+                    }
+                }
+            }
+        }
+    }
+}
