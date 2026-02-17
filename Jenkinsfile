@@ -11,7 +11,10 @@ pipeline {
         stage('Checkout & Config') {
             steps {
                 script {
+                    // Repo checkout
                     git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
+                    
+                    // Config settings
                     env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
                     env.REPORT_NAME = "Sales_Report_A"
                     env.DATASET_NAME = "Sales_Model_A"
@@ -32,10 +35,15 @@ pipeline {
         stage('Prep Target Dataset') {
             steps {
                 script {
+                    // Get Dataset GUID for binding
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' not found!" }
+                    
+                    if (!ds) { 
+                        error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi target workspace madhe!" 
+                    }
+                    
                     env.TARGET_DATASET_ID = ds.id
                     echo "🎯 Target Dataset GUID: ${env.TARGET_DATASET_ID}"
                 }
@@ -46,8 +54,11 @@ pipeline {
             steps {
                 script {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
+                    
+                    // 1. Convert report.json to Base64
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
+                    // 2. Create PBIR with Dataset Binding
                     def pbirJson = """{
                       "version": "1.0",
                       "datasetReference": {
@@ -65,6 +76,7 @@ pipeline {
                     writeFile file: 'definition.pbir', text: pbirJson
                     def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
                     
+                    // 3. Prepare Payload
                     def createPayload = [
                         displayName: env.REPORT_NAME,
                         type: "Report",
@@ -77,29 +89,22 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
+                    // 4. Call Fabric API
                     def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
                     def responseHeaders = sh(script: curlCmd, returnStdout: true)
                     
+                    // 5. Extract Operation URL for monitoring
                     def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
                     
                     if (opUrl && opUrl != "null") {
-                        echo "🔗 Monitoring Operation: ${opUrl}"
+                        echo "🔗 Monitoring Operation URL: ${opUrl}"
+                        
+                        // 6. Monitoring Loop
                         for(int i=0; i<15; i++) {
-                            echo "⏳ Monitoring (Attempt \${i+1})..."
-                            sleep 20
-                            def statusRaw = sh(script: "curl -s -X GET '\${opUrl}' -H 'Authorization: Bearer \${env.TOKEN}'", returnStdout: true)
-                            if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS!"
-                                return
-                            } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Error: \${statusRaw}"
-                            }
-                        }
-                    } else {
-                        error "❌ No Location Header found. API Response: \${responseHeaders}"
-                    }
-                }
-            }
-        }
-    }
-}
+                            int attemptNumber = i + 1
+                            echo "⏳ Monitoring (Attempt ${attemptNumber})..."
+                            sleep 25
+                            
+                            // Using Double Quotes for shell to access Groovy variable 'opUrl'
+                            def statusRaw = sh(script: "curl -s -X GET '${opUrl}' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                            echo
