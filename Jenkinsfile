@@ -2,16 +2,19 @@ pipeline {
     agent any
 
     environment {
-        CLIENT_ID     = credentials('fabric-client-id')
-        CLIENT_SECRET = credentials('fabric-client-secret')
-        TENANT_ID     = credentials('fabric-tenant-id')
+        CLIENT_ID        = credentials('fabric-client-id')
+        CLIENT_SECRET    = credentials('fabric-client-secret')
+        TENANT_ID        = credentials('fabric-tenant-id')
         
-        WORKSPACE_ID  = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-        MODEL_NAME    = "Sales_Model_A"
-        REPORT_NAME   = "Sales_Report_A"
+        WORKSPACE_ID     = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
+        MODEL_NAME       = "Sales_Model_A"
+        REPORT_NAME      = "Sales_Report_A"
         
-        MODEL_FOLDER  = "Customer-A/Sales_Model_A.SemanticModel"
-        REPORT_FOLDER = "Customer-A/Sales_Report_A.Report"
+        // The GUID from your screenshot
+        QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
+
+        MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
+        REPORT_FOLDER    = "Customer-A/Sales_Report_A.Report"
     }
 
     stages {
@@ -39,30 +42,16 @@ pipeline {
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
-                    
-                    def parts = []
-                    parts << [
-                        path: "definition.pbism", 
-                        payload: pbismBase64, 
-                        payloadType: "InlineBase64"
-                    ]
+                    def parts = [[path: "definition.pbism", payload: pbismBase64, payloadType: "InlineBase64"]]
                     
                     def tmdlFiles = sh(script: "find ${env.MODEL_FOLDER}/definition -name '*.tmdl'", returnStdout: true).split()
                     tmdlFiles.each { filePath ->
                         def relativePath = filePath.substring(filePath.indexOf("definition/"))
                         def fileBase64 = sh(script: "base64 -w 0 ${filePath}", returnStdout: true).trim()
-                        parts << [
-                            path: relativePath, 
-                            payload: fileBase64, 
-                            payloadType: "InlineBase64"
-                        ]
+                        parts << [path: relativePath, payload: fileBase64, payloadType: "InlineBase64"]
                     }
 
-                    def modelPayload = [
-                        displayName: env.MODEL_NAME,
-                        type: "SemanticModel",
-                        definition: [ parts: parts ]
-                    ]
+                    def modelPayload = [displayName: env.MODEL_NAME, type: "SemanticModel", definition: [ parts: parts ]]
                     writeJSON file: 'model_payload.json', json: modelPayload
 
                     def apiUrl = existingModel ? 
@@ -74,15 +63,59 @@ pipeline {
             }
         }
 
+        stage('Apply & Verify Connection') {
+            steps {
+                script {
+                    // 1. Get Model ID
+                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
+                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
+
+                    // 2. Bind to QA-A Connection
+                    def bindPayload = [
+                        gatewayObjectId: "00000000-0000-0000-0000-000000000000",
+                        datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
+                    ]
+                    writeJSON file: 'bind_payload.json', json: bindPayload
+
+                    sh """
+                        curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway" \
+                        -H "Authorization: Bearer ${env.TOKEN}" \
+                        -H "Content-Type: application/json" \
+                        -d @bind_payload.json
+                    """
+                    
+                    echo "⏳ Verifying Connection Update..."
+                    sleep 5 // Give Fabric a moment to register the change
+
+                    // 3. Verification: Fetch Discover Gateways for this dataset
+                    def verifyResp = sh(script: """
+                        curl -s -X GET "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/discoverGateways" \
+                        -H "Authorization: Bearer ${env.TOKEN}"
+                    """, returnStdout: true)
+                    
+                    def verifyJson = readJSON text: verifyResp
+                    
+                    // Check if the QA_CONNECTION_ID is currently selected/bound
+                    def isBound = verifyJson.value.any { gateway -> 
+                        gateway.datasources.any { ds -> ds.id == env.QA_CONNECTION_ID && ds.selected == true }
+                    }
+
+                    if (isBound) {
+                        echo "✅ VERIFIED: Model is successfully bound to connection ${env.QA_CONNECTION_ID}"
+                    } else {
+                        error "❌ VERIFICATION FAILED: Model is NOT bound to the expected connection."
+                    }
+                }
+            }
+        }
+
         stage('Deploy Report') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
-                    def itemsJson = readJSON text: itemsResp
-                    def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
-                    def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
+                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
+                    def existingReport = readJSON(text: itemsResp).value.find { it.displayName == env.REPORT_NAME }
 
-                    // PBIR Definition
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
@@ -98,7 +131,6 @@ pipeline {
                     }"""
                     writeFile file: 'definition.pbir', text: pbirJson
                     
-                    // Encode files separately to avoid line-break issues in the Map definition
                     def reportBase64 = sh(script: "base64 -w 0 ${env.REPORT_FOLDER}/report.json", returnStdout: true).trim()
                     def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
 
@@ -126,7 +158,7 @@ pipeline {
     
     post {
         always {
-            sh "rm -f model_payload.json report_payload.json definition.pbir"
+            sh "rm -f model_payload.json report_payload.json definition.pbir bind_payload.json"
         }
     }
 }
@@ -146,9 +178,6 @@ def fabricPoll(apiUrl, payloadFile) {
             } else if (statusJson.status == "Failed") {
                 error "❌ Fabric API Error: ${statusRaw}"
             }
-            echo "⏳ Polling Fabric API..."
         }
-    } else {
-        error "❌ API failed to start. Headers: ${responseHeaders}"
     }
 }
