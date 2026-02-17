@@ -10,7 +10,6 @@ pipeline {
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
-        // The GUID from your screenshot
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
 
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
@@ -63,14 +62,19 @@ pipeline {
             }
         }
 
-        stage('Apply & Verify Connection') {
+        stage('TakeOver & Apply Connection') {
             steps {
                 script {
-                    // 1. Get Model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    // 2. Bind to QA-A Connection
+                    echo "👑 Taking ownership of dataset to allow gateway binding..."
+                    sh """
+                        curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver" \
+                        -H "Authorization: Bearer ${env.TOKEN}" -H "Content-Length: 0"
+                    """
+
+                    echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
                         gatewayObjectId: "00000000-0000-0000-0000-000000000000",
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
@@ -84,26 +88,20 @@ pipeline {
                         -d @bind_payload.json
                     """
                     
-                    echo "⏳ Verifying Connection Update..."
-                    sleep 5 // Give Fabric a moment to register the change
+                    echo "⏳ Verifying Connection..."
+                    sleep 5
 
-                    // 3. Verification: Fetch Discover Gateways for this dataset
-                    def verifyResp = sh(script: """
-                        curl -s -X GET "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/discoverGateways" \
-                        -H "Authorization: Bearer ${env.TOKEN}"
-                    """, returnStdout: true)
-                    
+                    def verifyResp = sh(script: "curl -s -X GET 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/discoverGateways' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def verifyJson = readJSON text: verifyResp
                     
-                    // Check if the QA_CONNECTION_ID is currently selected/bound
                     def isBound = verifyJson.value.any { gateway -> 
                         gateway.datasources.any { ds -> ds.id == env.QA_CONNECTION_ID && ds.selected == true }
                     }
 
                     if (isBound) {
-                        echo "✅ VERIFIED: Model is successfully bound to connection ${env.QA_CONNECTION_ID}"
+                        echo "✅ VERIFIED: Connection successfully updated to ${env.QA_CONNECTION_ID}"
                     } else {
-                        error "❌ VERIFICATION FAILED: Model is NOT bound to the expected connection."
+                        error "❌ VERIFICATION FAILED: Model is NOT bound correctly. Response: ${verifyResp}"
                     }
                 }
             }
