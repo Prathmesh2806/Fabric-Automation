@@ -1,55 +1,17 @@
-pipeline {
-    agent any
-    environment {
-        CLIENT_ID     = credentials('fabric-client-id')
-        CLIENT_SECRET = credentials('fabric-client-secret')
-        TENANT_ID     = credentials('fabric-tenant-id')
-    }
-    stages {
-        stage('Checkout & Config') {
-            steps {
-                git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
-                script {
-                    env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-                    env.REPORT_NAME = "Sales_Report_A"
-                    env.DATASET_NAME = "Sales_Model_A"
-                    env.DETECTED_FOLDER = "Customer-A"
-                }
-            }
-        }
-        stage('Get Token') {
-            steps {
-                script {
-                    def tokenResponse = sh(script: "curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token -d 'grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=https://api.fabric.microsoft.com/.default'", returnStdout: true)
-                    env.TOKEN = readJSON(text: tokenResponse).access_token
-                }
-            }
-        }
-        stage('Prep Target Dataset') {
-            steps {
-                script {
-                    def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                    def itemsJson = readJSON text: itemsResponse
-                    def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
-                    env.TARGET_DATASET_ID = ds.id
-                    echo "🎯 Dataset GUID: ${env.TARGET_DATASET_ID}"
-                }
-            }
-        }
-        stage('Deploy Report') {
-            steps {
-                script {
-                    def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
-                    def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
-                    
-                    // FIXED: Removed pbiServiceModelId to avoid Type Mismatch
-                    // Using connectionString which supports GUID as string.
-                    def pbirJson = """{
+stage('Deploy Report') {
+    steps {
+        script {
+            def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
+            def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
+            
+            // PBIR JSON: Sending pbiServiceModelId as a proper JSON null (not "null" string)
+            // This satisfies the 'Required' check without triggering the 'Type Mismatch'
+            def pbirJson = """{
   "version": "1.0",
   "datasetReference": {
     "byConnection": {
       "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/TargetWorkspace;Initial Catalog=${env.DATASET_NAME};semanticModelId=${env.TARGET_DATASET_ID}",
+      "pbiServiceModelId": null,
       "pbiModelVirtualServerName": null,
       "pbiModelDatabaseName": null,
       "name": "EntityDataSource",
@@ -57,42 +19,28 @@ pipeline {
     }
   }
 }"""
-                    def pbirBase64 = sh(script: "echo '${pbirJson}' | base64 -w 0", returnStdout: true).trim()
-                    
-                    def createPayload = [
-                        displayName: env.REPORT_NAME,
-                        type: "Report",
-                        definition: [
-                            parts: [
-                                [path: "report.json", payload: reportContent, payloadType: "InlineBase64"],
-                                [path: "definition.pbir", payload: pbirBase64, payloadType: "InlineBase64"]
-                            ]
-                        ]
+            // Important: Use a temp file to ensure the 'null' stays as null and not a string during echo
+            writeFile file: 'definition.pbir', text: pbirJson
+            def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
+            
+            def createPayload = [
+                displayName: env.REPORT_NAME,
+                type: "Report",
+                definition: [
+                    parts: [
+                        [path: "report.json", payload: reportContent, payloadType: "InlineBase64"],
+                        [path: "definition.pbir", payload: pbirBase64, payloadType: "InlineBase64"]
                     ]
-                    writeJSON file: 'payload.json', json: createPayload
+                ]
+            ]
+            writeJSON file: 'payload.json', json: createPayload
 
-                    def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items " +
-                                  "-H 'Authorization: Bearer ${env.TOKEN}' " +
-                                  "-H 'Content-Type: application/json' -d @payload.json"
-                    
-                    def responseHeaders = sh(script: curlCmd, returnStdout: true)
-                    def opUrl = sh(script: "echo \"${responseHeaders}\" | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
-                    
-                    if (opUrl) {
-                        for(int i=0; i<12; i++) {
-                            echo "⏳ Monitoring (Attempt ${i+1})..."
-                            sleep 15
-                            def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                            if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Report Deployed."
-                                return
-                            } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Error: ${statusRaw}"
-                            }
-                        }
-                    }
-                }
-            }
+            def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items " +
+                          "-H 'Authorization: Bearer ${env.TOKEN}' " +
+                          "-H 'Content-Type: application/json' -d @payload.json"
+            
+            def responseHeaders = sh(script: curlCmd, returnStdout: true)
+            // ... (rest of the monitoring code)
         }
     }
 }
