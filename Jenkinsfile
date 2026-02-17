@@ -1,7 +1,6 @@
 pipeline {
     agent any
     environment {
-        // Credentials IDs match with your Jenkins settings
         CLIENT_ID     = credentials('fabric-client-id')
         CLIENT_SECRET = credentials('fabric-client-secret')
         TENANT_ID     = credentials('fabric-tenant-id')
@@ -11,7 +10,6 @@ pipeline {
             steps {
                 git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
                 script {
-                    // Tumche Environment Variables
                     env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
                     env.REPORT_NAME = "Sales_Report_A"
                     env.DATASET_NAME = "Sales_Model_A"
@@ -30,20 +28,17 @@ pipeline {
         stage('Cleanup') {
             steps {
                 script {
-                    // Workspace madhle items list kara
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
                     
-                    // 1. Dataset ID shodha (Report link karnyasathi garjeche aahe)
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi! Please check your workspace." }
+                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
                     echo "🎯 Dataset ID sapdla: ${env.TARGET_DATASET_ID}"
 
-                    // 2. Juna Report asel tar to delete kara
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
-                        echo "🧹 Juna Report '${env.REPORT_NAME}' delete kartoy..."
+                        echo "🧹 Juna Report delete kartoy..."
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
                         sleep 10
                     }
@@ -54,16 +49,20 @@ pipeline {
             steps {
                 script {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
-                    
-                    // 1. report.json Base64 madhe convert kara
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // 2. PBIR dynamic generate kara (byConnection format madhe)
-                    // Fabric API la "ByPath" chalat nahi, tyamule apan swatacha JSON banavtoye
+                    // PBIR Schema Fix: Adding all mandatory properties as null to satisfy Fabric's strict parser
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
+                                "connectionString": null,
+                                "pbiServiceXml": null,
+                                "pbiModelVirtualPath": null,
+                                "pbiModelDatabaseName": null,
+                                "name": null,
+                                "pbiServiceModelId": null,
+                                "pbiModelVirtualServerName": null,
                                 "connectionId": "${env.TARGET_DATASET_ID}",
                                 "connectionType": "pbiServiceXml"
                             }
@@ -72,7 +71,6 @@ pipeline {
                     
                     def pbirBase64 = sh(script: "echo '${pbirJson}' | base64 -w 0", returnStdout: true).trim()
                     
-                    // 3. Final Payload tayar kara
                     def createPayload = [
                         displayName: env.REPORT_NAME,
                         type: "Report",
@@ -85,36 +83,30 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    echo "🚀 Fabric API la Deployment Request pathavtoye..."
+                    echo "🚀 Sending Payload with strict PBIR schema..."
                     
-                    // 4. API Call kara ani Location Header (Operation URL) capture kara
                     def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items " +
                                   "-H 'Authorization: Bearer ${env.TOKEN}' " +
                                   "-H 'Content-Type: application/json' -d @payload.json"
                     
                     def responseHeaders = sh(script: curlCmd, returnStdout: true)
-                    
-                    // Location URL kadhnyasathi simple grep vapru (No Regex Serialization issues)
                     def opUrl = sh(script: "echo \"${responseHeaders}\" | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
                     
                     if (opUrl) {
-                        echo "🔍 Operation Track kartoy: ${opUrl}"
-                        // Status loop (Check every 20 seconds)
+                        echo "🔍 Tracking Operation: ${opUrl}"
                         for(int i=0; i<6; i++) {
-                            echo "⏳ Attempt ${i+1}: Waiting for Fabric to finish..."
+                            echo "⏳ Attempt ${i+1}: Checking status..."
                             sleep 20
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                            
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Report '${env.REPORT_NAME}' yashasviphane deploy jhala aahe."
+                                echo "✅ SUCCESS! Report deploy jhala."
                                 return
                             } else if (statusRaw.contains("Failed")) {
                                 error "❌ Fabric Failure: ${statusRaw}"
                             }
                         }
-                        error "❌ Timeout: Fabric ne khup vel ghetla."
                     } else {
-                        error "❌ Operation URL sapdli nahi. API Response check kara: ${responseHeaders}"
+                        error "❌ Operation URL sapdli nahi. Response: ${responseHeaders}"
                     }
                 }
             }
