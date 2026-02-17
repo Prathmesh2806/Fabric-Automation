@@ -1,21 +1,20 @@
-pipeline { // 1. Start Pipeline
+pipeline {
     agent any
-    
     environment {
         CLIENT_ID     = credentials('fabric-client-id')
         CLIENT_SECRET = credentials('fabric-client-secret')
         TENANT_ID     = credentials('fabric-tenant-id')
+        WORKSPACE_ID  = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
+        REPORT_NAME   = "Sales_Report_A"
+        DATASET_NAME  = "Sales_Model_A"
+        DETECTED_FOLDER = "Customer-A"
     }
     
-    stages { // 2. Start Stages
+    stages {
         stage('Checkout & Config') {
             steps {
                 script {
                     git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
-                    env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-                    env.REPORT_NAME = "Sales_Report_A"
-                    env.DATASET_NAME = "Sales_Model_A"
-                    env.DETECTED_FOLDER = "Customer-A"
                 }
             }
         }
@@ -29,24 +28,30 @@ pipeline { // 1. Start Pipeline
             }
         }
 
-        stage('Prep Target Dataset') {
+        stage('Find IDs & Prep') {
             steps {
                 script {
-                    def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                    // 1. Find Dataset GUID and Report ID in one go
+                    def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
+                    
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    
-                    if (!ds) { 
-                        error "❌ Dataset '${env.DATASET_NAME}' not found!" 
-                    }
-                    
+                    if (!ds) { error "❌ Target Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
-                    echo "🎯 Target Dataset GUID: ${env.TARGET_DATASET_ID}"
+
+                    def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME && it.type == "Report" }
+                    if (existingReport) {
+                        env.REPORT_ID = existingReport.id
+                        echo "🔍 Found existing report ID: ${env.REPORT_ID}. Will perform updateItemDefinition."
+                    } else {
+                        env.REPORT_ID = ""
+                        echo "🆕 Report not found. Will perform fresh Create."
+                    }
                 }
             }
         }
 
-        stage('Deploy Report') {
+        stage('Update or Create Report') {
             steps {
                 script {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
@@ -57,8 +62,6 @@ pipeline { // 1. Start Pipeline
                       "datasetReference": {
                         "byConnection": {
                           "connectionString": null,
-                          "pbiServiceModelId": null,
-                          "pbiModelVirtualServerName": null,
                           "pbiModelDatabaseName": "${env.TARGET_DATASET_ID}",
                           "name": "EntityDataSource",
                           "connectionType": "pbiServiceXml"
@@ -69,9 +72,7 @@ pipeline { // 1. Start Pipeline
                     writeFile file: 'definition.pbir', text: pbirJson
                     def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
                     
-                    def createPayload = [
-                        displayName: env.REPORT_NAME,
-                        type: "Report",
+                    def payload = [
                         definition: [
                             parts: [
                                 [path: "report.json", payload: reportContent, payloadType: "InlineBase64"],
@@ -79,42 +80,45 @@ pipeline { // 1. Start Pipeline
                             ]
                         ]
                     ]
-                    writeJSON file: 'payload.json', json: createPayload
+                    writeJSON file: 'payload.json', json: payload
 
-                    def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
+                    def apiEndpoint = ""
+                    if (env.REPORT_ID != "") {
+                        // UPDATE Logic: No displayName needed in payload
+                        apiEndpoint = "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${env.REPORT_ID}/updateItemDefinition"
+                    } else {
+                        // CREATE Logic: Add displayName to payload
+                        payload.displayName = env.REPORT_NAME
+                        payload.type = "Report"
+                        writeJSON file: 'payload.json', json: payload
+                        apiEndpoint = "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
+                    }
+
+                    def curlCmd = "curl -i -s -X POST ${apiEndpoint} -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
                     def responseHeaders = sh(script: curlCmd, returnStdout: true)
                     
                     def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
                     
                     if (opUrl && opUrl != "null") {
-                        echo "🔗 Operation URL: ${opUrl}"
+                        echo "🔗 Monitoring Operation: ${opUrl}"
                         for(int i=0; i<15; i++) {
-                            int attemptNum = i + 1
-                            echo "⏳ Monitoring (Attempt ${attemptNum})..."
                             sleep 25
                             def statusRaw = sh(script: "curl -s -X GET '${opUrl}' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                            echo "🔍 Status: ${statusRaw}"
-                            
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Deployment Complete."
+                                echo "✅ SUCCESS! Report Updated In-place without deletion."
                                 return
-                            } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Error: ${statusRaw}"
                             }
                         }
                     } else {
-                        error "❌ Deployment Start Failed: ${responseHeaders}"
+                        error "❌ API failed. Response: ${responseHeaders}"
                     }
                 }
             }
         }
-    } // 2. End Stages
-
+    }
     post {
         always {
-            script {
-                sh "rm -f definition.pbir payload.json"
-            }
+            sh "rm -f definition.pbir payload.json"
         }
     }
-} // 1. End Pipeline
+}
