@@ -47,42 +47,43 @@ pipeline {
         stage('Deploy & Status Check') {
             steps {
                 script {
-                    def reportPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report/report.json"
-                    def reportContent = sh(script: "base64 -w 0 ${reportPath}", returnStdout: true).trim()
+                    def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     
+                    // 1. Donhi files Base64 madhe convert kara
+                    def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
+                    def pbirContent = sh(script: "base64 -w 0 ${folderPath}/definition.pbir", returnStdout: true).trim()
+                    
+                    // 2. Payload madhe donhi parts add kara
                     def createPayload = [
                         displayName: env.REPORT_NAME,
                         type: "Report",
-                        definition: [parts: [[path: "report.json", payload: reportContent, payloadType: "InlineBase64"]]],
+                        definition: [
+                            parts: [
+                                [path: "report.json", payload: reportContent, payloadType: "InlineBase64"],
+                                [path: "definition.pbir", payload: pbirContent, payloadType: "InlineBase64"]
+                            ]
+                        ],
                         relations: [[id: env.TARGET_DATASET_ID, type: "SemanticModel"]]
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    // Capture location header using grep to avoid Regex Serialization issues
+                    echo "🚀 Sending payload with both report.json and definition.pbir..."
+                    
                     def opUrl = sh(script: "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
                     
                     if (opUrl) {
-                        echo "🔍 Tracking Operation: ${opUrl}"
-                        // Loop for checking status
                         for(int i=0; i<6; i++) {
-                            echo "⏳ Attempt ${i+1}: Waiting for Fabric to finish..."
+                            echo "⏳ Checking Status (Attempt ${i+1})..."
                             sleep 20
                             def statusJson = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                            echo "Current Status: ${statusJson}"
-                            
                             if (statusJson.contains("Succeeded")) {
-                                echo "✅ EXCELLENT! Report '${env.REPORT_NAME}' banla aahe."
+                                echo "✅ SUCCESS! Report banla aahe. Ata UI check kar!"
                                 return
                             } else if (statusJson.contains("Failed")) {
-                                error "❌ Fabric error dila: ${statusJson}"
+                                error "❌ Fabric Failure: ${statusJson}"
                             }
                         }
-                    } else {
-                        echo "⚠️ Operation URL sapdli nahi, manually check kara."
-                        sleep 30
                     }
                 }
             }
         }
-    }
-}
