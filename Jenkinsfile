@@ -34,10 +34,11 @@ pipeline {
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
                     if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
-                    echo "🎯 Dataset ID: ${env.TARGET_DATASET_ID}"
+                    echo "🎯 Dataset ID sapdla: ${env.TARGET_DATASET_ID}"
 
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
+                        echo "🧹 Juna Report delete kartoy..."
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
                         sleep 10
                     }
@@ -50,29 +51,28 @@ pipeline {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // PBIR Logic: Fixed type mismatch and added missing mandatory properties
-                    def pbirJson = """{
-                        "version": "1.0",
-                        "datasetReference": {
-                            "byConnection": {
-                                "connectionString": null,
-                                "pbiServiceXml": null,
-                                "pbiModelVirtualPath": null,
-                                "pbiModelDatabaseName": null,
-                                "name": null,
-                                "pbiServiceModelId": null,
-                                "pbiModelVirtualServerName": null,
-                                "connectionId": "${env.TARGET_DATASET_ID}",
-                                "connectionType": "pbiServiceXml"
-                            }
-                        }
-                    }"""
+                    // ATA NET LAKSHA DE BHAU:
+                    // Fabric API la 'byPath' wala format saglyat jasta avadto pipeline madhe.
+                    // To direct Dataset folder la link karto. 
+                    // Jar tula direct Dataset ID vapraycha asel, tar khali dilaela schema use kara:
                     
-                    // Note: If Fabric still complains about connectionId, we might need a different object structure.
-                    // But based on your error, it specifically wants connectionType and pbiModelVirtualServerName.
-
+                    def pbirJson = """{
+  "version": "1.0",
+  "datasetReference": {
+    "byConnection": {
+      "connectionString": null,
+      "pbiServiceModelId": null,
+      "pbiModelVirtualServerName": null,
+      "pbiModelDatabaseName": null,
+      "name": "EntityDataSource",
+      "connectionType": "pbiServiceXml"
+    }
+  }
+}"""
+                    // PBIR base64 conversion
                     def pbirBase64 = sh(script: "echo '${pbirJson}' | base64 -w 0", returnStdout: true).trim()
                     
+                    // Payload assembly
                     def createPayload = [
                         displayName: env.REPORT_NAME,
                         type: "Report",
@@ -85,7 +85,7 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    echo "🚀 Deploying with Fixed PBIR Types..."
+                    echo "🚀 Final Attempt with Clean Schema..."
                     
                     def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items " +
                                   "-H 'Authorization: Bearer ${env.TOKEN}' " +
@@ -95,19 +95,21 @@ pipeline {
                     def opUrl = sh(script: "echo \"${responseHeaders}\" | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
                     
                     if (opUrl) {
-                        for(int i=0; i<6; i++) {
+                        for(int i=0; i<8; i++) {
                             echo "⏳ Attempt ${i+1}: Waiting for Fabric..."
                             sleep 20
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Deployment Complete."
+                                echo "✅ SUCCESS! Report deploy jhala."
                                 return
                             } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Failure: ${statusRaw}"
+                                // Jar Failed jhala tar exact error message print kara
+                                echo "❌ Debugging Error: ${statusRaw}"
+                                error "❌ Fabric Failure sapdla."
                             }
                         }
                     } else {
-                        error "❌ Could not find Operation URL."
+                        error "❌ Operation URL sapdli nahi. API response check kara."
                     }
                 }
             }
