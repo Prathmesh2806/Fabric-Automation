@@ -83,7 +83,11 @@ pipeline {
                                 error "❌ Fabric Failure: ${statusJson}"
                             }
                         }
+                    } else {
+                        error "❌ Operation URL sapḍalī nāhī!"
                     }
                 }
             }
         }
+    }
+}
