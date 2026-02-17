@@ -1,4 +1,4 @@
-pipeline {
+pipeline { // 1. Start Pipeline
     agent any
     
     environment {
@@ -7,7 +7,7 @@ pipeline {
         TENANT_ID     = credentials('fabric-tenant-id')
     }
     
-    stages {
+    stages { // 2. Start Stages
         stage('Checkout & Config') {
             steps {
                 script {
@@ -37,7 +37,7 @@ pipeline {
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
                     
                     if (!ds) { 
-                        error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" 
+                        error "❌ Dataset '${env.DATASET_NAME}' not found!" 
                     }
                     
                     env.TARGET_DATASET_ID = ds.id
@@ -84,4 +84,37 @@ pipeline {
                     def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
                     def responseHeaders = sh(script: curlCmd, returnStdout: true)
                     
-                    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim
+                    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
+                    
+                    if (opUrl && opUrl != "null") {
+                        echo "🔗 Operation URL: ${opUrl}"
+                        for(int i=0; i<15; i++) {
+                            int attemptNum = i + 1
+                            echo "⏳ Monitoring (Attempt ${attemptNum})..."
+                            sleep 25
+                            def statusRaw = sh(script: "curl -s -X GET '${opUrl}' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                            echo "🔍 Status: ${statusRaw}"
+                            
+                            if (statusRaw.contains("Succeeded")) {
+                                echo "✅ SUCCESS! Deployment Complete."
+                                return
+                            } else if (statusRaw.contains("Failed")) {
+                                error "❌ Fabric Error: ${statusRaw}"
+                            }
+                        }
+                    } else {
+                        error "❌ Deployment Start Failed: ${responseHeaders}"
+                    }
+                }
+            }
+        }
+    } // 2. End Stages
+
+    post {
+        always {
+            script {
+                sh "rm -f definition.pbir payload.json"
+            }
+        }
+    }
+} // 1. End Pipeline
