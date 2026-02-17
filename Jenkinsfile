@@ -1,113 +1,110 @@
-pipeline {
-    agent any // Defining agent here ensures the workspace persists for post-actions
-    
+pipeline { // 1. Start Pipeline
+    agent any
     environment {
-        WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-        REPORT_NAME  = "Sales_Report_A"
-        // Replace 'github-creds' with your actual Jenkins Credential ID for Azure/Fabric
-        AZURE_CREDS = credentials('github-creds') 
+        CLIENT_ID     = credentials('fabric-client-id')
+        CLIENT_SECRET = credentials('fabric-client-secret')
+        TENANT_ID     = credentials('fabric-tenant-id')
     }
-
-    stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
-        stage('Get Access Token') {
+    stages { // 2. Start Stages
+        stage('Checkout & Config') {
             steps {
                 script {
-                    // Note the use of $AZURE_CREDS_PSW to avoid interpolation warnings
-                    def tokenResponse = sh(script: """
-                        curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token \
-                        -d grant_type=client_credentials \
-                        -d client_id=${AZURE_CREDS_USR} \
-                        -d client_secret=${AZURE_CREDS_PSW} \
-                        -d scope=https://api.fabric.microsoft.com/.default
-                    """, returnStdout: true)
-                    def tokenJson = readJSON text: tokenResponse
-                    env.FABRIC_TOKEN = tokenJson.access_token
+                    git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
+                    env.TARGET_WORKSPACE_ID = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
+                    env.REPORT_NAME = "Sales_Report_A"
+                    env.DATASET_NAME = "Sales_Model_A"
+                    env.DETECTED_FOLDER = "Customer-A"
                 }
             }
         }
-
-        stage('Find or Prep Item') {
+ 
+        stage('Get Token') {
             steps {
                 script {
-                    def itemsResponse = sh(script: """
-                        curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${WORKSPACE_ID}/items \
-                        -H "Authorization: Bearer ${env.FABRIC_TOKEN}"
-                    """, returnStdout: true)
-                    
+                    def tokenResponse = sh(script: "curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token -d 'grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}&scope=https://api.fabric.microsoft.com/.default'", returnStdout: true)
+                    env.TOKEN = readJSON(text: tokenResponse).access_token
+                }
+            }
+        }
+ 
+        stage('Prep Target Dataset') {
+            steps {
+                script {
+                    def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
-                    def existingItem = itemsJson.value.find { it.displayName == env.REPORT_NAME }
-                    
-                    if (existingItem) {
-                        echo "🔍 Found existing report: ${env.REPORT_NAME} (ID: ${existingItem.id})"
-                        env.ITEM_ID = existingItem.id
-                        env.MODE = "UPDATE"
-                    } else {
-                        echo "🆕 Report not found. Switching to CREATE mode."
-                        env.MODE = "CREATE"
+                    def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
+                    if (!ds) { 
+                        error "❌ Dataset '${env.DATASET_NAME}' not found!" 
                     }
+                    env.TARGET_DATASET_ID = ds.id
+                    echo "🎯 Target Dataset GUID: ${env.TARGET_DATASET_ID}"
                 }
             }
         }
-
-        stage('Deploy & Monitor') {
+ 
+        stage('Deploy Report') {
             steps {
                 script {
-                    def reportBase64 = sh(script: "base64 -w 0 Customer-A/Sales_Report_A.Report/report.json", returnStdout: true).trim()
+                    def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
+                    def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
+                    def pbirJson = """{
+                      "version": "1.0",
+                      "datasetReference": {
+                        "byConnection": {
+                          "connectionString": null,
+                          "pbiServiceModelId": null,
+                          "pbiModelVirtualServerName": null,
+                          "pbiModelDatabaseName": "${env.TARGET_DATASET_ID}",
+                          "name": "EntityDataSource",
+                          "connectionType": "pbiServiceXml"
+                        }
+                      }
+                    }"""
+                    writeFile file: 'definition.pbir', text: pbirJson
                     def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
-
-                    def payload = [
+                    def createPayload = [
                         displayName: env.REPORT_NAME,
                         type: "Report",
                         definition: [
                             parts: [
-                                [path: "report.json", payload: reportBase64, payloadType: "InlineBase64"],
+                                [path: "report.json", payload: reportContent, payloadType: "InlineBase64"],
                                 [path: "definition.pbir", payload: pbirBase64, payloadType: "InlineBase64"]
                             ]
                         ]
                     ]
-                    writeJSON file: 'payload.json', json: payload
-
-                    def apiEndpoint = (env.MODE == "UPDATE") ? 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${WORKSPACE_ID}/items/${env.ITEM_ID}/updateDefinition" : 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${WORKSPACE_ID}/items"
-
-                    sh """
-                        curl -i -s -X POST ${apiEndpoint} \
-                        -H "Authorization: Bearer ${env.FABRIC_TOKEN}" \
-                        -H "Content-Type: application/json" \
-                        -d @payload.json > headers.txt
-                    """
-
-                    env.OPERATION_URL = sh(script: "grep -i 'location:' headers.txt | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
-                    
-                    // Polling logic
-                    if (env.OPERATION_URL) {
-                        def status = "InProgress"
-                        while (status == "InProgress" || status == "NotStarted") {
-                            echo "⏳ Waiting for Fabric (Status: ${status})..."
-                            sleep 20
-                            def opResponse = sh(script: "curl -s -H 'Authorization: Bearer ${env.FABRIC_TOKEN}' ${env.OPERATION_URL}", returnStdout: true)
-                            def opJson = readJSON text: opResponse
-                            status = opJson.status
-                            if (status == "Failed") error "❌ Fabric Error: ${opJson.error}"
+                    writeJSON file: 'payload.json', json: createPayload
+ 
+                    def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @payload.json"
+                    def responseHeaders = sh(script: curlCmd, returnStdout: true)
+                    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
+                    if (opUrl && opUrl != "null") {
+                        echo "🔗 Operation URL: ${opUrl}"
+                        for(int i=0; i<15; i++) {
+                            int attemptNum = i + 1
+                            echo "⏳ Monitoring (Attempt ${attemptNum})..."
+                            sleep 25
+                            def statusRaw = sh(script: "curl -s -X GET '${opUrl}' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                            echo "🔍 Status: ${statusRaw}"
+                            if (statusRaw.contains("Succeeded")) {
+                                echo "✅ SUCCESS! Deployment Complete."
+                                return
+                            } else if (statusRaw.contains("Failed")) {
+                                error "❌ Fabric Error: ${statusRaw}"
+                            }
                         }
-                        echo "🚀 Success!"
+                    } else {
+                        error "❌ Deployment Start Failed: ${responseHeaders}"
                     }
                 }
             }
         }
-    }
-    
+    } // 2. End Stages
+ 
     post {
         always {
-            // This will now work because 'agent any' keeps the workspace context open
-            sh "rm -f payload.json headers.txt"
+            script {
+                sh "rm -f definition.pbir payload.json"
+            }
         }
     }
-}
+} // 1. End Pipeline
