@@ -18,7 +18,6 @@ pipeline {
         stage('Checkout & Auth') {
             steps {
                 script {
-                    // Checkout the dev branch
                     git branch: 'dev', credentialsId: 'github-creds', url: 'https://github.com/Prathmesh2806/Fabric-Automation.git'
                     
                     def tokenResponse = sh(script: """
@@ -36,25 +35,19 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    // 1. Check for existing model
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
-                    // 2. Build Multi-Part Payload for TMDL
                     def parts = []
-                    
-                    // Add the root definition file
                     parts << [
                         path: "definition.pbism", 
                         payload: sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim(), 
                         payloadType: "InlineBase64"
                     ]
                     
-                    // Recursively find ALL .tmdl files (model, expressions, tables, etc.)
                     def tmdlFiles = sh(script: "find ${env.MODEL_FOLDER}/definition -name '*.tmdl'", returnStdout: true).split()
                     
                     tmdlFiles.each { filePath ->
-                        // Extract relative path (e.g., definition/tables/SalesData.tmdl)
                         def relativePath = filePath.substring(filePath.indexOf("definition/"))
                         parts << [
                             path: relativePath, 
@@ -87,4 +80,69 @@ pipeline {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def itemsJson = readJSON text: itemsResp
                     def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
-                    def existingReport = itemsJson.value.find
+                    def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
+
+                    def pbirJson = """{
+                        "version": "1.0",
+                        "datasetReference": {
+                            "byConnection": {
+                                "pbiModelDatabaseName": "${modelId}",
+                                "name": "EntityDataSource",
+                                "connectionType": "pbiServiceXml"
+                            }
+                        }
+                    }"""
+                    writeFile file: 'definition.pbir', text: pbirJson
+                    
+                    def reportPayload = [
+                        displayName: env.REPORT_NAME,
+                        type: "Report",
+                        definition: [
+                            parts: [
+                                [path: "report.json", payload: sh(script: "base64 -w 0 ${env.REPORT_FOLDER}/report.json", returnStdout: true).trim(), payloadType: "InlineBase64"],
+                                [path: "definition.pbir", payload: sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim(), payloadType: "InlineBase64"]
+                            ]
+                        ]
+                    ]
+                    writeJSON file: 'report_payload.json', json: reportPayload
+
+                    def apiUrl = existingReport ? 
+                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingReport.id}/updateDefinition" : 
+                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
+                    
+                    echo "🚀 Deploying Report..."
+                    fabricPoll(apiUrl, 'report_payload.json')
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            sh "rm -f model_payload.json report_payload.json definition.pbir"
+        }
+    }
+}
+
+// Polling function outside the pipeline block
+def fabricPoll(apiUrl, payloadFile) {
+    def responseHeaders = sh(script: "curl -i -s -X POST ${apiUrl} -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @${payloadFile}", returnStdout: true)
+    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
+
+    if (opUrl && opUrl != "null") {
+        while (true) {
+            sleep 15
+            def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
+            def statusJson = readJSON text: statusRaw
+            if (statusJson.status == "Succeeded") {
+                echo "✅ Success!"
+                break
+            } else if (statusJson.status == "Failed") {
+                error "❌ Fabric API Error: ${statusRaw}"
+            }
+            echo "⏳ Still working..."
+        }
+    } else {
+        error "❌ API failed to start. Headers: ${responseHeaders}"
+    }
+}
