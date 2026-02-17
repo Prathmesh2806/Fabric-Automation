@@ -34,11 +34,9 @@ pipeline {
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
                     if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
-                    echo "🎯 Dataset ID sapdla: ${env.TARGET_DATASET_ID}"
 
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
-                        echo "🧹 Juna Report delete kartoy..."
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
                         sleep 10
                     }
@@ -51,20 +49,16 @@ pipeline {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // PBIR Schema Fix: Adding all mandatory properties as null to satisfy Fabric's strict parser
+                    // Fabric Minimalist PBIR Fix: Fakt connectionString vapruya
+                    // Fabric ID-based connection sathi he format vaprato
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
-                                "connectionString": null,
-                                "pbiServiceXml": null,
-                                "pbiModelVirtualPath": null,
-                                "pbiModelDatabaseName": null,
-                                "name": null,
-                                "pbiServiceModelId": null,
-                                "pbiModelVirtualServerName": null,
-                                "connectionId": "${env.TARGET_DATASET_ID}",
-                                "connectionType": "pbiServiceXml"
+                                "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/YourWorkspace;Initial Catalog=${env.DATASET_NAME};Integrated Security=ClaimsToken",
+                                "pbiServiceModelId": "${env.TARGET_DATASET_ID}",
+                                "pbiModelDatabaseName": "${env.TARGET_DATASET_ID}",
+                                "name": "EntityDataSource"
                             }
                         }
                     }"""
@@ -83,7 +77,7 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    echo "🚀 Sending Payload with strict PBIR schema..."
+                    echo "🚀 Sending Payload with Native Fabric PBIR format..."
                     
                     def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items " +
                                   "-H 'Authorization: Bearer ${env.TOKEN}' " +
@@ -93,20 +87,19 @@ pipeline {
                     def opUrl = sh(script: "echo \"${responseHeaders}\" | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
                     
                     if (opUrl) {
-                        echo "🔍 Tracking Operation: ${opUrl}"
                         for(int i=0; i<6; i++) {
-                            echo "⏳ Attempt ${i+1}: Checking status..."
+                            echo "⏳ Attempt ${i+1}: Waiting..."
                             sleep 20
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Report deploy jhala."
+                                echo "✅ SUCCESS! Report Deploy Jhala!"
                                 return
                             } else if (statusRaw.contains("Failed")) {
                                 error "❌ Fabric Failure: ${statusRaw}"
                             }
                         }
                     } else {
-                        error "❌ Operation URL sapdli nahi. Response: ${responseHeaders}"
+                        error "❌ Operation URL sapdli nahi."
                     }
                 }
             }
