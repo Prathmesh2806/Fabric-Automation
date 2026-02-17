@@ -35,9 +35,11 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
+                    // Fetch existing items to see if we update or create
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
+                    // Build Multi-Part TMDL Payload
                     def parts = []
                     parts << [
                         path: "definition.pbism", 
@@ -75,74 +77,4 @@ pipeline {
         stage('Deploy Report') {
             steps {
                 script {
-                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
-                    def itemsJson = readJSON text: itemsResp
-                    def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
-                    def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
-
-                    // CRITICAL FIX: The new mandatory .pbir schema
-                    def pbirJson = """{
-                        "version": "1.0",
-                        "datasetReference": {
-                            "byConnection": {
-                                "connectionString": null,
-                                "pbiServiceModelId": "${modelId}",
-                                "pbiModelVirtualServerName": "sobe_wowvirtualserver",
-                                "pbiModelDatabaseName": "${modelId}",
-                                "name": "EntityDataSource",
-                                "connectionType": "pbiServiceXml"
-                            }
-                        }
-                    }"""
-                    writeFile file: 'definition.pbir', text: pbirJson
-                    
-                    def reportPayload = [
-                        displayName: env.REPORT_NAME,
-                        type: "Report",
-                        definition: [
-                            parts: [
-                                [path: "report.json", payload: sh(script: "base64 -w 0 ${env.REPORT_FOLDER}/report.json", returnStdout: true).trim(), payloadType: "InlineBase64"],
-                                [path: "definition.pbir", payload: sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim(), payloadType: "InlineBase64"]
-                            ]
-                        ]
-                    ]
-                    writeJSON file: 'report_payload.json', json: reportPayload
-
-                    def apiUrl = existingReport ? 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingReport.id}/updateDefinition" : 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
-                    
-                    echo "🚀 Deploying Report with NEW schema..."
-                    fabricPoll(apiUrl, 'report_payload.json')
-                }
-            }
-        }
-    }
-    
-    post {
-        always {
-            sh "rm -f model_payload.json report_payload.json definition.pbir"
-        }
-    }
-}
-
-def fabricPoll(apiUrl, payloadFile) {
-    def responseHeaders = sh(script: "curl -i -s -X POST ${apiUrl} -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @${payloadFile}", returnStdout: true)
-    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
-
-    if (opUrl && opUrl != "null") {
-        while (true) {
-            sleep 15
-            def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
-            def statusJson = readJSON text: statusRaw
-            if (statusJson.status == "Succeeded") {
-                echo "✅ Success!"
-                break
-            } else if (statusJson.status == "Failed") {
-                error "❌ Fabric API Error: ${statusRaw}"
-            }
-        }
-    } else {
-        error "❌ API failed to start."
-    }
-}
+                    def itemsResp = sh
