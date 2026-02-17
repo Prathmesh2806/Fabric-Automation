@@ -35,16 +35,21 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
+                    // 1. Get Workspace Items
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
+                    // 2. Build Multi-Part TMDL Payload
                     def parts = []
+                    
+                    // Root file
                     parts << [
                         path: "definition.pbism", 
                         payload: sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim(), 
                         payloadType: "InlineBase64"
                     ]
                     
+                    // Recursive find for all .tmdl files (model, tables, expressions, etc.)
                     def tmdlFiles = sh(script: "find ${env.MODEL_FOLDER}/definition -name '*.tmdl'", returnStdout: true).split()
                     
                     tmdlFiles.each { filePath ->
@@ -54,7 +59,7 @@ pipeline {
                             payload: sh(script: "base64 -w 0 ${filePath}", returnStdout: true).trim(), 
                             payloadType: "InlineBase64"
                         ]
-                        echo "📦 Included TMDL Part: ${relativePath}"
+                        echo "📦 Included: ${relativePath}"
                     }
 
                     def modelPayload = [
@@ -64,11 +69,12 @@ pipeline {
                     ]
                     writeJSON file: 'model_payload.json', json: modelPayload
 
+                    // 3. Update or Create
                     def apiUrl = existingModel ? 
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingModel.id}/updateDefinition" : 
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
                     
-                    echo "🚀 Deploying Full Semantic Model Structure..."
+                    echo "🚀 Deploying Semantic Model..."
                     fabricPoll(apiUrl, 'model_payload.json')
                 }
             }
@@ -82,6 +88,7 @@ pipeline {
                     def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
                     def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
 
+                    // Create dynamic .pbir
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
@@ -124,7 +131,7 @@ pipeline {
     }
 }
 
-// Polling function outside the pipeline block
+// Helper function placed OUTSIDE the pipeline block
 def fabricPoll(apiUrl, payloadFile) {
     def responseHeaders = sh(script: "curl -i -s -X POST ${apiUrl} -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @${payloadFile}", returnStdout: true)
     def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
@@ -140,7 +147,7 @@ def fabricPoll(apiUrl, payloadFile) {
             } else if (statusJson.status == "Failed") {
                 error "❌ Fabric API Error: ${statusRaw}"
             }
-            echo "⏳ Still working..."
+            echo "⏳ Polling Fabric API..."
         }
     } else {
         error "❌ API failed to start. Headers: ${responseHeaders}"
