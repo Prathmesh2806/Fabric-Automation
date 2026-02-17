@@ -35,11 +35,9 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    // Fetch existing items to see if we update or create
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
-                    // Build Multi-Part TMDL Payload
                     def parts = []
                     parts << [
                         path: "definition.pbism", 
@@ -77,4 +75,31 @@ pipeline {
         stage('Deploy Report') {
             steps {
                 script {
-                    def itemsResp = sh
+                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
+                    def itemsJson = readJSON text: itemsResp
+                    def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
+                    def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
+
+                    // schema fix: literals for pbiServiceModelId and pbiModelVirtualServerName
+                    def pbirJson = """{
+                        "version": "1.0",
+                        "datasetReference": {
+                            "byConnection": {
+                                "connectionString": null,
+                                "pbiServiceModelId": null,
+                                "pbiModelVirtualServerName": null,
+                                "pbiModelDatabaseName": "${modelId}",
+                                "name": "EntityDataSource",
+                                "connectionType": "pbiServiceXml"
+                            }
+                        }
+                    }"""
+                    writeFile file: 'definition.pbir', text: pbirJson
+                    
+                    def reportPayload = [
+                        displayName: env.REPORT_NAME,
+                        type: "Report",
+                        definition: [
+                            parts: [
+                                [path: "report.json", payload: sh(script: "base64 -w 0 ${env.REPORT_FOLDER}/report.json", returnStdout: true).trim(), payloadType: "InlineBase64"],
+                                [path: "definition.pbir", payload: sh(script: "base
