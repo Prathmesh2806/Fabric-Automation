@@ -34,6 +34,7 @@ pipeline {
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
                     if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
+                    echo "🎯 Dataset ID: ${env.TARGET_DATASET_ID}"
 
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
@@ -49,20 +50,27 @@ pipeline {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // Fabric Minimalist PBIR Fix: Fakt connectionString vapruya
-                    // Fabric ID-based connection sathi he format vaprato
+                    // PBIR Logic: Fixed type mismatch and added missing mandatory properties
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
-                                "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/YourWorkspace;Initial Catalog=${env.DATASET_NAME};Integrated Security=ClaimsToken",
-                                "pbiServiceModelId": "${env.TARGET_DATASET_ID}",
-                                "pbiModelDatabaseName": "${env.TARGET_DATASET_ID}",
-                                "name": "EntityDataSource"
+                                "connectionString": null,
+                                "pbiServiceXml": null,
+                                "pbiModelVirtualPath": null,
+                                "pbiModelDatabaseName": null,
+                                "name": null,
+                                "pbiServiceModelId": null,
+                                "pbiModelVirtualServerName": null,
+                                "connectionId": "${env.TARGET_DATASET_ID}",
+                                "connectionType": "pbiServiceXml"
                             }
                         }
                     }"""
                     
+                    // Note: If Fabric still complains about connectionId, we might need a different object structure.
+                    // But based on your error, it specifically wants connectionType and pbiModelVirtualServerName.
+
                     def pbirBase64 = sh(script: "echo '${pbirJson}' | base64 -w 0", returnStdout: true).trim()
                     
                     def createPayload = [
@@ -77,7 +85,7 @@ pipeline {
                     ]
                     writeJSON file: 'payload.json', json: createPayload
 
-                    echo "🚀 Sending Payload with Native Fabric PBIR format..."
+                    echo "🚀 Deploying with Fixed PBIR Types..."
                     
                     def curlCmd = "curl -i -s -X POST https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items " +
                                   "-H 'Authorization: Bearer ${env.TOKEN}' " +
@@ -88,18 +96,18 @@ pipeline {
                     
                     if (opUrl) {
                         for(int i=0; i<6; i++) {
-                            echo "⏳ Attempt ${i+1}: Waiting..."
+                            echo "⏳ Attempt ${i+1}: Waiting for Fabric..."
                             sleep 20
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Report Deploy Jhala!"
+                                echo "✅ SUCCESS! Deployment Complete."
                                 return
                             } else if (statusRaw.contains("Failed")) {
                                 error "❌ Fabric Failure: ${statusRaw}"
                             }
                         }
                     } else {
-                        error "❌ Operation URL sapdli nahi."
+                        error "❌ Could not find Operation URL."
                     }
                 }
             }
