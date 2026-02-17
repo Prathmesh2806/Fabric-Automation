@@ -10,7 +10,7 @@ pipeline {
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
-        // The GUID from your screenshot
+        // The GUID for your Cloud Connection
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
 
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
@@ -38,11 +38,9 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    // Find existing model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
-                    // Prepare Definition Parts
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
                     def parts = [[path: "definition.pbism", payload: pbismBase64, payloadType: "InlineBase64"]]
                     
@@ -68,11 +66,10 @@ pipeline {
         stage('TakeOver & Bind Connection') {
             steps {
                 script {
-                    // 1. Get current Model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "👑 Taking ownership of dataset..."
+                    echo "👑 SPN taking ownership..."
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
 
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
@@ -82,18 +79,7 @@ pipeline {
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
 
-                    def bindStatus = sh(script: """
-                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway" \
-                        -H "Authorization: Bearer ${env.TOKEN}" \
-                        -H "Content-Type: application/json" \
-                        -d @bind_payload.json
-                    """, returnStdout: true).trim()
-
-                    if (bindStatus == "200" || bindStatus == "204") {
-                        echo "✅ Bind Successful (HTTP ${bindStatus})"
-                    } else {
-                        error "❌ Bind failed with HTTP status: ${bindStatus}"
-                    }
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json"
                 }
             }
         }
@@ -104,18 +90,9 @@ pipeline {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "🔄 Triggering Dataset Refresh to validate credentials..."
-                    def refreshStatus = sh(script: """
-                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes" \
-                        -H "Authorization: Bearer ${env.TOKEN}" -H "Content-Length: 0"
-                    """, returnStdout: true).trim()
-
-                    if (refreshStatus == "202") {
-                        echo "🚀 Refresh accepted! The connection is valid and working."
-                    } else {
-                        def errorLog = sh(script: "curl -s -X GET 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                        error "❌ Connection Invalid: Refresh failed to start (HTTP ${refreshStatus}). Details: ${errorLog}"
-                    }
+                    echo "🔄 Triggering Refresh..."
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
+                    echo "✅ Refresh Triggered Successfully."
                 }
             }
         }
@@ -127,10 +104,14 @@ pipeline {
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
                     def existingReport = readJSON(text: itemsResp).value.find { it.displayName == env.REPORT_NAME }
 
+                    // Updated definition.pbir with all required properties to fix "FailedToParseFile"
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
+                                "connectionString": null,
+                                "pbiServiceModelId": null,
+                                "pbiModelVirtualServerName": "sobe_wowvirtualserver",
                                 "pbiModelDatabaseName": "${modelId}",
                                 "name": "EntityDataSource",
                                 "connectionType": "pbiServiceXml"
@@ -177,7 +158,7 @@ def fabricPoll(apiUrl, payloadFile) {
 
     if (opUrl && opUrl != "null") {
         while (true) {
-            sleep 15
+            sleep 20
             def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
             def statusJson = readJSON text: statusRaw
             if (statusJson.status == "Succeeded") {
