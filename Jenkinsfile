@@ -30,6 +30,13 @@ pipeline {
                 script {
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
+                    
+                    // Dataset GUID shodha
+                    def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
+                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
+                    env.TARGET_DATASET_ID = ds.id
+
+                    // Juna report asel tar kadha
                     def rep = itemsJson.value.find { it.displayName == env.REPORT_NAME }
                     if (rep) {
                         sh "curl -s -X DELETE https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items/${rep.id} -H 'Authorization: Bearer ${env.TOKEN}'"
@@ -44,13 +51,16 @@ pipeline {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // THE FIX: Using 'byPath' instead of 'byConnection'. 
-                    // This is the native Fabric Git/API format that avoids GUID type errors.
+                    // SOLUTION: Vapara 'connectionString' with 'semanticModelId' 
+                    // Ha format Fabric API la saglyat safe vato.
                     def pbirJson = """{
   "version": "1.0",
   "datasetReference": {
-    "byPath": {
-      "path": "../${env.DATASET_NAME}.SemanticModel"
+    "byConnection": {
+      "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/TargetWorkspace;Initial Catalog=${env.DATASET_NAME};semanticModelId=${env.TARGET_DATASET_ID}",
+      "pbiServiceModelId": null,
+      "connectionType": "pbiServiceXml",
+      "name": "EntityDataSource"
     }
   }
 }"""
@@ -77,18 +87,18 @@ pipeline {
                     
                     if (opUrl) {
                         for(int i=0; i<10; i++) {
-                            echo "⏳ Attempt ${i+1}..."
+                            echo "⏳ Final Monitoring Attempt ${i+1}..."
                             sleep 20
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Deployment Finished."
+                                echo "✅ SUCCESS! Deployment Complete."
                                 return
                             } else if (statusRaw.contains("Failed")) {
-                                error "❌ Fabric Error: ${statusRaw}"
+                                error "❌ Fabric Deployment Failed: ${statusRaw}"
                             }
                         }
                     } else {
-                        error "❌ No Operation URL."
+                        error "❌ Operation URL missing."
                     }
                 }
             }
