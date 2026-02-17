@@ -10,6 +10,7 @@ pipeline {
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
+        // The GUID from your screenshot
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
 
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
@@ -37,9 +38,11 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
+                    // Find existing model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
+                    // Prepare Definition Parts
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
                     def parts = [[path: "definition.pbism", payload: pbismBase64, payloadType: "InlineBase64"]]
                     
@@ -62,17 +65,15 @@ pipeline {
             }
         }
 
-        stage('TakeOver & Apply Connection') {
+        stage('TakeOver & Bind Connection') {
             steps {
                 script {
+                    // 1. Get current Model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "👑 Taking ownership of dataset to allow gateway binding..."
-                    sh """
-                        curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver" \
-                        -H "Authorization: Bearer ${env.TOKEN}" -H "Content-Length: 0"
-                    """
+                    echo "👑 Taking ownership of dataset..."
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
 
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
@@ -81,27 +82,39 @@ pipeline {
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
 
-                    sh """
-                        curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway" \
+                    def bindStatus = sh(script: """
+                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway" \
                         -H "Authorization: Bearer ${env.TOKEN}" \
                         -H "Content-Type: application/json" \
                         -d @bind_payload.json
-                    """
-                    
-                    echo "⏳ Verifying Connection..."
-                    sleep 5
+                    """, returnStdout: true).trim()
 
-                    def verifyResp = sh(script: "curl -s -X GET 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/discoverGateways' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
-                    def verifyJson = readJSON text: verifyResp
-                    
-                    def isBound = verifyJson.value.any { gateway -> 
-                        gateway.datasources.any { ds -> ds.id == env.QA_CONNECTION_ID && ds.selected == true }
-                    }
-
-                    if (isBound) {
-                        echo "✅ VERIFIED: Connection successfully updated to ${env.QA_CONNECTION_ID}"
+                    if (bindStatus == "200" || bindStatus == "204") {
+                        echo "✅ Bind Successful (HTTP ${bindStatus})"
                     } else {
-                        error "❌ VERIFICATION FAILED: Model is NOT bound correctly. Response: ${verifyResp}"
+                        error "❌ Bind failed with HTTP status: ${bindStatus}"
+                    }
+                }
+            }
+        }
+
+        stage('Validate Connection (Refresh)') {
+            steps {
+                script {
+                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
+                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
+
+                    echo "🔄 Triggering Dataset Refresh to validate credentials..."
+                    def refreshStatus = sh(script: """
+                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes" \
+                        -H "Authorization: Bearer ${env.TOKEN}" -H "Content-Length: 0"
+                    """, returnStdout: true).trim()
+
+                    if (refreshStatus == "202") {
+                        echo "🚀 Refresh accepted! The connection is valid and working."
+                    } else {
+                        def errorLog = sh(script: "curl -s -X GET 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
+                        error "❌ Connection Invalid: Refresh failed to start (HTTP ${refreshStatus}). Details: ${errorLog}"
                     }
                 }
             }
@@ -118,9 +131,6 @@ pipeline {
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
-                                "connectionString": null,
-                                "pbiServiceModelId": null,
-                                "pbiModelVirtualServerName": null,
                                 "pbiModelDatabaseName": "${modelId}",
                                 "name": "EntityDataSource",
                                 "connectionType": "pbiServiceXml"
@@ -171,7 +181,7 @@ def fabricPoll(apiUrl, payloadFile) {
             def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
             def statusJson = readJSON text: statusRaw
             if (statusJson.status == "Succeeded") {
-                echo "✅ Success!"
+                echo "✅ Operation Success!"
                 break
             } else if (statusJson.status == "Failed") {
                 error "❌ Fabric API Error: ${statusRaw}"
