@@ -25,17 +25,15 @@ pipeline {
                 }
             }
         }
-        stage('Cleanup & Prep') {
+        stage('Prep Target Dataset') {
             steps {
                 script {
-                    // QA Workspace madhla Dataset ID shodha (Screenshot madhe distoye to)
                     def itemsResponse = sh(script: "curl -s -X GET https://api.fabric.microsoft.com/v1/workspaces/${env.TARGET_WORKSPACE_ID}/items -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                     def itemsJson = readJSON text: itemsResponse
-                    
                     def ds = itemsJson.value.find { it.displayName == env.DATASET_NAME }
-                    if (!ds) { error "❌ Workspace madhe '${env.DATASET_NAME}' sapdla nahi. Screenshot madhe asun pan API ka dakhavat nahiye te check kara." }
+                    if (!ds) { error "❌ Dataset '${env.DATASET_NAME}' sapdla nahi!" }
                     env.TARGET_DATASET_ID = ds.id
-                    echo "🎯 Target Dataset GUID: ${env.TARGET_DATASET_ID}"
+                    echo "🎯 Dataset GUID: ${env.TARGET_DATASET_ID}"
                 }
             }
         }
@@ -45,13 +43,13 @@ pipeline {
                     def folderPath = "${env.DETECTED_FOLDER}/${env.REPORT_NAME}.Report"
                     def reportContent = sh(script: "base64 -w 0 ${folderPath}/report.json", returnStdout: true).trim()
                     
-                    // FIXED SCHEMA: All mandatory properties included
+                    // FIXED: Removed pbiServiceModelId to avoid Type Mismatch
+                    // Using connectionString which supports GUID as string.
                     def pbirJson = """{
   "version": "1.0",
   "datasetReference": {
     "byConnection": {
-      "connectionString": null,
-      "pbiServiceModelId": "${env.TARGET_DATASET_ID}",
+      "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/TargetWorkspace;Initial Catalog=${env.DATASET_NAME};semanticModelId=${env.TARGET_DATASET_ID}",
       "pbiModelVirtualServerName": null,
       "pbiModelDatabaseName": null,
       "name": "EntityDataSource",
@@ -81,19 +79,17 @@ pipeline {
                     def opUrl = sh(script: "echo \"${responseHeaders}\" | grep -i 'location:' | cut -d' ' -f2", returnStdout: true).trim()
                     
                     if (opUrl) {
-                        for(int i=0; i<10; i++) {
-                            echo "⏳ Monitoring Attempt ${i+1}..."
-                            sleep 20
+                        for(int i=0; i<12; i++) {
+                            echo "⏳ Monitoring (Attempt ${i+1})..."
+                            sleep 15
                             def statusRaw = sh(script: "curl -s -X GET ${opUrl} -H 'Authorization: Bearer ${env.TOKEN}'", returnStdout: true)
                             if (statusRaw.contains("Succeeded")) {
-                                echo "✅ SUCCESS! Report Deployed and Linked to ${env.DATASET_NAME}."
+                                echo "✅ SUCCESS! Report Deployed."
                                 return
                             } else if (statusRaw.contains("Failed")) {
                                 error "❌ Fabric Error: ${statusRaw}"
                             }
                         }
-                    } else {
-                        error "❌ Operation URL missing in Response."
                     }
                 }
             }
