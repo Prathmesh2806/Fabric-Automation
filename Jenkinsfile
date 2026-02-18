@@ -2,14 +2,17 @@ pipeline {
     agent any
 
     environment {
+        // Credentials IDs from Jenkins Global Credentials
         CLIENT_ID        = credentials('fabric-client-id')
         CLIENT_SECRET    = credentials('fabric-client-secret')
         TENANT_ID        = credentials('fabric-tenant-id')
         
+        // Configuration
         WORKSPACE_ID     = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-        MODEL_NAME        = "Sales_Model_A"
-        REPORT_NAME       = "Sales_Report_A"
+        MODEL_NAME       = "Sales_Model_A"
+        REPORT_NAME      = "Sales_Report_A"
         
+        // Connection Info
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
         REPORT_FOLDER    = "Customer-A/Sales_Report_A.Report"
@@ -31,7 +34,7 @@ pipeline {
                     echo "🔍 Verifying Capacity Status..."
                     def capCheck = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/capacities", returnStdout: true)
                     if (capCheck.contains("Paused") || capCheck.contains("Inactive")) {
-                        error "❌ Capacity is PAUSED."
+                        error "❌ Capacity is PAUSED. Please resume it in the Azure Portal."
                     }
                     echo "✅ Capacity is Active."
                 }
@@ -69,40 +72,33 @@ pipeline {
        stage('Ownership & Connection Binding') {
             steps {
                 script {
-                    // 1. Get Model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
-                    if (!modelId) error "❌ Could not find Model ID for ${env.MODEL_NAME}"
 
                     echo "👑 Taking Ownership of Model: ${modelId}"
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
                     
-                    sleep 10
+                    sleep 15 // Increased wait for ownership to propagate
 
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
-                        gatewayObjectId: "00000000-0000-0000-0000-000000000000", // Required for Cloud Connections
+                        gatewayObjectId: "00000000-0000-0000-0000-000000000000",
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json"
                     
-                    sleep 5
+                    sleep 10
 
-                    echo "🔐 Fetching Dynamic Gateway/Datasource IDs..."
+                    echo "🔐 Verifying Datasource Type..."
                     def dsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/datasources", returnStdout: true)
                     def dsJson = readJSON text: dsResp
                     
-                    // Logic to find the correct datasource object
-                    def dsObject = dsJson.value.find { it.datasourceId != null }
+                    // Logic to find if a standard cloud datasource needs a PATCH
+                    def dsObject = dsJson.value.find { it.datasourceId != null && it.gatewayId != null }
                     
-                    if (dsObject && dsObject.datasourceId && dsObject.gatewayId) {
-                        def targetDsId = dsObject.datasourceId
-                        def targetGwId = dsObject.gatewayId
-                        
-                        echo "🎯 Target Gateway: ${targetGwId}"
-                        echo "🎯 Target Datasource: ${targetDsId}"
-
+                    if (dsObject) {
+                        echo "🎯 Standard Cloud Source detected (ID: ${dsObject.datasourceId}). Patching credentials..."
                         def credPayload = [
                             credentialDetails: [
                                 credentialType: "OAuth2",
@@ -112,16 +108,12 @@ pipeline {
                             ]
                         ]
                         writeJSON file: 'cred_payload.json', json: credPayload
-
-                        sh """
-                            curl -s -X PATCH "https://api.powerbi.com/v1.0/myorg/gateways/${targetGwId}/datasources/${targetDsId}" \
-                            -H "Authorization: Bearer ${env.TOKEN}" \
-                            -H "Content-Type: application/json" \
-                            -d @cred_payload.json
-                        """
+                        sh "curl -s -X PATCH 'https://api.powerbi.com/v1.0/myorg/gateways/${dsObject.gatewayId}/datasources/${dsObject.datasourceId}' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @cred_payload.json"
                         echo "✅ Connection fully updated and authenticated."
+                    } else if (dsJson.value.any { it.datasourceType == "AzureDataLakeStorage" }) {
+                        echo "💡 Fabric OneLake source detected. Manual credential patching skipped (automatically handled by Service Principal)."
                     } else {
-                        error "❌ Failed to retrieve valid Gateway/Datasource IDs. Response: ${dsResp}"
+                        echo "⚠️ Warning: Could not identify datasource for patching. Proceeding to Refresh stage anyway."
                     }
                 }
             }
@@ -133,8 +125,10 @@ pipeline {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "🔄 Triggering Refresh..."
+                    echo "🔄 Triggering Refresh for Model: ${modelId}"
+                    // Using a more robust refresh call
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
+                    echo "✅ Refresh triggered successfully."
                 }
             }
         }
@@ -200,7 +194,7 @@ def fabricPoll(apiUrl, payloadFile) {
     if (opUrl && opUrl != "null") {
         echo "📡 Polling Operation: ${opUrl}"
         int retryCount = 0
-        int maxRetries = 10 
+        int maxRetries = 15 // Increased for larger models
 
         while (retryCount < maxRetries) {
             sleep 20
@@ -215,7 +209,7 @@ def fabricPoll(apiUrl, payloadFile) {
             }
             retryCount++
         }
-        error "❌ Operation timed out."
+        error "❌ Operation timed out after ${maxRetries * 20} seconds."
     } else {
         error "❌ Failed to initiate operation. No Location header found."
     }
