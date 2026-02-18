@@ -47,15 +47,16 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    // 1. Patch TMDL with QA Metadata
-                    // This replaces the hardcoded DEV IDs and Environment parameters in the file
                     echo "🛠️ Patching TMDL for QA Environment..."
+                    // Use a different delimiter (|) for sed to avoid escaping slashes in the URL
+                    // We also ensure we only replace the IDs inside the existing quotes
                     sh """
-                        # Update the OneLake URL to point to QA Workspace and QA Lakehouse
-                        sed -i 's|onelake.dfs.fabric.microsoft.com/[^/]*/[^/]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.QA_LAKEHOUSE_ID}|g' ${env.MODEL_FOLDER}/definition/expressions.tmdl
+                        # 1. Replace the Workspace ID and Lakehouse ID in the Onelake URL
+                        # This regex looks for the specific URL pattern and swaps the IDs
+                        sed -i 's|onelake.dfs.fabric.microsoft.com/[a-f0-9-]*/[a-f0-9-]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.QA_LAKEHOUSE_ID}|g' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                         
-                        # Update Parameters
-                        sed -i 's/expression EnvironmentName = ".*"/expression EnvironmentName = "QA"/' ${env.MODEL_FOLDER}/definition/expressions.tmdl
+                        # 2. Update Environment Parameter
+                        sed -i 's/expression EnvironmentName = ".*"/expression EnvironmentName = "QA"/' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                     """
 
                     // 2. Build Payload
