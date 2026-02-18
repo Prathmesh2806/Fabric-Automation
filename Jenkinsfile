@@ -2,13 +2,14 @@ pipeline {
     agent any
 
     environment {
-        // Keeping your original working credential declarations
+        // Credentials IDs from Jenkins Global Credentials
         CLIENT_ID        = credentials('fabric-client-id')
         CLIENT_SECRET    = credentials('fabric-client-secret')
         TENANT_ID        = credentials('fabric-tenant-id')
         
         // Configuration
         WORKSPACE_ID     = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
+        SEMANTIC_MODEL_ID = "5bd5e7ae-95ff-4251-8fd3-f6d14fa8439c"
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
@@ -44,7 +45,7 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    // 1. DYNAMIC DISCOVERY: Get the correct Lakehouse ID for this workspace
+                    // 1. DYNAMIC DISCOVERY: Get the Lakehouse ID
                     echo "🔍 Finding Lakehouse in Workspace ${env.WORKSPACE_ID}..."
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def itemsJson = readJSON(text: itemsResp)
@@ -56,18 +57,22 @@ pipeline {
                     def ACTUAL_LAKEHOUSE_ID = targetLakehouse.id
                     echo "✅ Found Lakehouse ID: ${ACTUAL_LAKEHOUSE_ID}"
 
-                    // 2. PATCHING: Ensure TMDL matches the discovered Lakehouse and Workspace
-                    echo "🛠️ Patching TMDL metadata for Consistency..."
+                    // 2. PATCHING: The 'sed' command now strictly preserves double quotes
+                    echo "🛠️ Patching TMDL metadata..."
                     sh """
-                        # Update the OneLake URL to use the correct Workspace and Lakehouse GUIDs
+                        # We use | as a delimiter. We match the URL pattern and replace it 
+                        # while ensuring the result is wrapped in double quotes.
                         sed -i 's|onelake.dfs.fabric.microsoft.com/[^/]*/[^/]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${ACTUAL_LAKEHOUSE_ID}|g' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                         
-                        # Set Environment to QA
+                        # Ensure EnvironmentName is set to QA
                         sed -i 's/expression EnvironmentName = .*/expression EnvironmentName = "QA"/' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                     """
 
+                    // PRE-FLIGHT CHECK: Print the file to Jenkins console to verify quotes
+                    echo "📝 Verifying patched expressions.tmdl content:"
+                    sh "cat ${env.MODEL_FOLDER}/definition/expressions.tmdl"
+
                     // 3. ENCODING: Build the payload
-                    def existingModel = itemsJson.value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
                     def parts = [[path: "definition.pbism", payload: pbismBase64, payloadType: "InlineBase64"]]
                     
@@ -82,9 +87,8 @@ pipeline {
                     writeJSON file: 'model_payload.json', json: modelPayload
 
                     // 4. DEPLOY
-                    def apiUrl = existingModel ? 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingModel.id}/updateDefinition" : 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
+                    // Using the SEMANTIC_MODEL_ID from environment to update existing model
+                    def apiUrl = "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${env.SEMANTIC_MODEL_ID}/updateDefinition"
                     
                     fabricPoll(apiUrl, 'model_payload.json')
                 }
@@ -94,132 +98,5 @@ pipeline {
         stage('Ownership & Connection Binding') {
             steps {
                 script {
-                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
-                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
-
-                    echo "👑 Taking Ownership of Model: ${modelId}"
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
-                    
-                    sleep 15 
-
-                    echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
-                    def bindPayload = [
-                        gatewayObjectId: "00000000-0000-0000-0000-000000000000",
-                        datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
-                    ]
-                    writeJSON file: 'bind_payload.json', json: bindPayload
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json"
-                    
-                    sleep 10
-                }
-            }
-        }
-
-        stage('Refresh & Validate Connection') {
-            steps {
-                script {
-                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
-                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
-
-                    echo "🔄 Triggering Refresh for Model: ${modelId}"
-                    def refreshPayload = [ type: "Full", commitMode: "transactional" ]
-                    writeJSON file: 'refresh_payload.json', json: refreshPayload
-
-                    def refreshHttpCode = sh(script: """
-                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes" \
-                        -H "Authorization: Bearer ${env.TOKEN}" \
-                        -H "Content-Type: application/json" \
-                        -d @refresh_payload.json
-                    """, returnStdout: true).trim()
-
-                    if (refreshHttpCode == "202") {
-                        echo "✅ Refresh Accepted."
-                    } else {
-                        error "❌ Failed to trigger refresh. HTTP Code: ${refreshHttpCode}"
-                    }
-                }
-            }
-        }
-
-        stage('Deploy Report') {
-            steps {
-                script {
-                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
-                    def itemsJson = readJSON(text: itemsResp)
-                    def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
-                    def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
-
-                    def pbirJson = """{
-                        "version": "1.0",
-                        "datasetReference": {
-                            "byConnection": {
-                                "connectionString": null,
-                                "pbiServiceModelId": null,
-                                "pbiModelVirtualServerName": "sobe_wowvirtualserver",
-                                "pbiModelDatabaseName": "${modelId}",
-                                "name": "EntityDataSource",
-                                "connectionType": "pbiServiceXml"
-                            }
-                        }
-                    }"""
-                    writeFile file: 'definition.pbir', text: pbirJson
-                    
-                    def reportBase64 = sh(script: "base64 -w 0 ${env.REPORT_FOLDER}/report.json", returnStdout: true).trim()
-                    def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
-
-                    def reportPayload = [
-                        displayName: env.REPORT_NAME,
-                        type: "Report",
-                        definition: [
-                            parts: [
-                                [path: "report.json", payload: reportBase64, payloadType: "InlineBase64"],
-                                [path: "definition.pbir", payload: pbirBase64, payloadType: "InlineBase64"]
-                            ]
-                        ]
-                    ]
-                    writeJSON file: 'report_payload.json', json: reportPayload
-
-                    def apiUrl = existingReport ? 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items/${existingReport.id}/updateDefinition" : 
-                        "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
-                    
-                    fabricPoll(apiUrl, 'report_payload.json')
-                }
-            }
-        }
-    }
-    
-    post {
-        always {
-            sh "rm -f model_payload.json report_payload.json definition.pbir bind_payload.json cred_payload.json refresh_payload.json"
-        }
-    }
-}
-
-def fabricPoll(apiUrl, payloadFile) {
-    def responseHeaders = sh(script: "curl -i -s -X POST ${apiUrl} -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @${payloadFile}", returnStdout: true)
-    def opUrl = sh(script: "echo '${responseHeaders}' | grep -i 'location:' | awk '{print \$2}' | tr -d '\\r'", returnStdout: true).trim()
-
-    if (opUrl && opUrl != "null") {
-        echo "📡 Polling Operation: ${opUrl}"
-        int retryCount = 0
-        int maxRetries = 20 
-
-        while (retryCount < maxRetries) {
-            sleep 20
-            def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
-            def statusJson = readJSON text: statusRaw
-            
-            if (statusJson.status == "Succeeded") {
-                echo "✅ Operation Success!"
-                return 
-            } else if (statusJson.status == "Failed") {
-                error "❌ Fabric API Failure: ${statusRaw}"
-            }
-            retryCount++
-        }
-        error "❌ Operation timed out."
-    } else {
-        error "❌ Failed to initiate operation. No Location header found."
-    }
-}
+                    echo "👑 Taking Ownership of Model: ${env.SEMANTIC_MODEL_ID}"
+                    sh "curl -s
