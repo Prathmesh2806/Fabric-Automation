@@ -44,19 +44,21 @@ pipeline {
             }
         }
 
-        stage('Deploy Semantic Model') {
+       stage('Deploy Semantic Model') {
             steps {
                 script {
                     echo "🛠️ Patching TMDL for QA Environment..."
-                    // Use a different delimiter (|) for sed to avoid escaping slashes in the URL
-                    // We also ensure we only replace the IDs inside the existing quotes
                     sh """
-                        # 1. Replace the Workspace ID and Lakehouse ID in the Onelake URL
-                        # This regex looks for the specific URL pattern and swaps the IDs
-                        sed -i 's|onelake.dfs.fabric.microsoft.com/[a-f0-9-]*/[a-f0-9-]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.QA_LAKEHOUSE_ID}|g' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
+                        # 1. Use a simpler, more direct replacement for the OneLake URL
+                        # We target the specific pattern and replace the entire ID segment
+                        sed -i 's|onelake.dfs.fabric.microsoft.com/[^/]*/[^/]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.QA_LAKEHOUSE_ID}|g' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                         
                         # 2. Update Environment Parameter
-                        sed -i 's/expression EnvironmentName = ".*"/expression EnvironmentName = "QA"/' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
+                        sed -i 's/expression EnvironmentName = .*/expression EnvironmentName = "QA"/' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
+                        
+                        # 3. VERIFICATION: Print the patched line to the Jenkins log so we can see it
+                        echo "Verify Patched Line:"
+                        grep "onelake.dfs.fabric.microsoft.com" "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                     """
 
                     // 2. Build Payload
