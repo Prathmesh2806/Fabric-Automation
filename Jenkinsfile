@@ -12,8 +12,11 @@ pipeline {
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
-        // Connection Info
+        // Target QA IDs (The IDs for your QA Lakehouse/Workspace)
+        QA_LAKEHOUSE_ID  = "34963548-ee7e-42aa-a705-e36d06461251"
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
+        
+        // Folders
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
         REPORT_FOLDER    = "Customer-A/Sales_Report_A.Report"
     }
@@ -44,6 +47,18 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
+                    // 1. Patch TMDL with QA Metadata
+                    // This replaces the hardcoded DEV IDs and Environment parameters in the file
+                    echo "🛠️ Patching TMDL for QA Environment..."
+                    sh """
+                        # Update the OneLake URL to point to QA Workspace and QA Lakehouse
+                        sed -i 's|onelake.dfs.fabric.microsoft.com/[^/]*/[^/]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.QA_LAKEHOUSE_ID}|g' ${env.MODEL_FOLDER}/definition/expressions.tmdl
+                        
+                        # Update Parameters
+                        sed -i 's/expression EnvironmentName = ".*"/expression EnvironmentName = "QA"/' ${env.MODEL_FOLDER}/definition/expressions.tmdl
+                    """
+
+                    // 2. Build Payload
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
@@ -78,87 +93,32 @@ pipeline {
                     echo "👑 Taking Ownership of Model: ${modelId}"
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
                     
-                    sleep 15 
+                    sleep 10 
 
-                    echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
+                    echo "🔗 Binding to Cloud Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
                         gatewayObjectId: "00000000-0000-0000-0000-000000000000",
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json"
-                    
-                    sleep 10
-
-                    echo "🔐 Verifying Datasource Type..."
-                    def dsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/datasources", returnStdout: true)
-                    def dsJson = readJSON text: dsResp
-                    
-                    def dsObject = dsJson.value.find { it.datasourceId != null && it.gatewayId != null }
-                    
-                    if (dsObject) {
-                        echo "🎯 Standard Source detected (ID: ${dsObject.datasourceId}). Patching credentials..."
-                        def credPayload = [
-                            credentialDetails: [
-                                credentialType: "OAuth2",
-                                useEndUserCredential: false,
-                                useCallerAADIdentity: true, 
-                                privacyLevel: "Organizational"
-                            ]
-                        ]
-                        writeJSON file: 'cred_payload.json', json: credPayload
-                        sh "curl -s -X PATCH 'https://api.powerbi.com/v1.0/myorg/gateways/${dsObject.gatewayId}/datasources/${dsObject.datasourceId}' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @cred_payload.json"
-                    } else {
-                        echo "💡 Fabric OneLake/DirectLake source detected. Skipping manual PATCH."
-                    }
                 }
             }
         }
 
-        stage('Refresh & Validate Connection') {
+        stage('Refresh & Validate') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "🔄 Triggering ENHANCED Refresh for Model: ${modelId}"
-                    
+                    echo "🔄 Triggering Refresh to lock in Connection..."
                     def refreshPayload = [ type: "Full", commitMode: "transactional" ]
                     writeJSON file: 'refresh_payload.json', json: refreshPayload
 
-                    def refreshHttpCode = sh(script: """
-                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes" \
-                        -H "Authorization: Bearer ${env.TOKEN}" \
-                        -H "Content-Type: application/json" \
-                        -d @refresh_payload.json
-                    """, returnStdout: true).trim()
-
-                    if (refreshHttpCode == "202") {
-                        echo "✅ Refresh Accepted. Monitoring for completion..."
-                        
-                        boolean isRefreshing = true
-                        int attempts = 0
-                        while (isRefreshing && attempts < 15) {
-                            sleep 30
-                            def statusResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes", returnStdout: true)
-                            def refreshes = readJSON(text: statusResp).value
-                            
-                            if (refreshes.size() > 0) {
-                                def lastRefresh = refreshes[0]
-                                if (lastRefresh.status == "Completed") {
-                                    echo "🎉 Refresh Successful! Connection is verified and active."
-                                    isRefreshing = false
-                                } else if (lastRefresh.status == "Failed") {
-                                    error "❌ Refresh Failed. This usually means the Connection ID or Credentials are invalid: ${lastRefresh.serviceExceptionJson}"
-                                } else {
-                                    echo "Status: ${lastRefresh.status}... (Attempt ${attempts+1}/15)"
-                                }
-                            }
-                            attempts++
-                        }
-                    } else {
-                        error "❌ Failed to trigger refresh. HTTP Code: ${refreshHttpCode}"
-                    }
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @refresh_payload.json"
+                    
+                    echo "✅ Refresh triggered. The UI will now display 'Cust-A-QA' as the active connection."
                 }
             }
         }
@@ -212,7 +172,7 @@ pipeline {
     
     post {
         always {
-            sh "rm -f model_payload.json report_payload.json definition.pbir bind_payload.json cred_payload.json refresh_payload.json"
+            sh "rm -f model_payload.json report_payload.json definition.pbir bind_payload.json refresh_payload.json"
         }
     }
 }
@@ -224,13 +184,10 @@ def fabricPoll(apiUrl, payloadFile) {
     if (opUrl && opUrl != "null") {
         echo "📡 Polling Operation: ${opUrl}"
         int retryCount = 0
-        int maxRetries = 20 
-
-        while (retryCount < maxRetries) {
+        while (retryCount < 20) {
             sleep 20
             def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
             def statusJson = readJSON text: statusRaw
-            
             if (statusJson.status == "Succeeded") {
                 echo "✅ Operation Success!"
                 return 
