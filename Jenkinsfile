@@ -10,7 +10,7 @@ pipeline {
         SEMANTIC_MODEL_ID = "5bd5e7ae-95ff-4251-8fd3-f6d14fa8439c"
         MODEL_NAME       = "Sales_Model_A"
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
-        QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
+        QA_CONNECTION_ID = "7d3a6d82-0f86-42b0-9c98-84610e10ff95"
     }
 
     stages {
