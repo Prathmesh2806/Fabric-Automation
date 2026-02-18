@@ -69,7 +69,7 @@ pipeline {
             }
         }
 
-       stage('Ownership & Connection Binding') {
+        stage('Ownership & Connection Binding') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
@@ -78,7 +78,7 @@ pipeline {
                     echo "👑 Taking Ownership of Model: ${modelId}"
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
                     
-                    sleep 15 // Increased wait for ownership to propagate
+                    sleep 15 
 
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
@@ -94,11 +94,10 @@ pipeline {
                     def dsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/datasources", returnStdout: true)
                     def dsJson = readJSON text: dsResp
                     
-                    // Logic to find if a standard cloud datasource needs a PATCH
                     def dsObject = dsJson.value.find { it.datasourceId != null && it.gatewayId != null }
                     
                     if (dsObject) {
-                        echo "🎯 Standard Cloud Source detected (ID: ${dsObject.datasourceId}). Patching credentials..."
+                        echo "🎯 Standard Source detected (ID: ${dsObject.datasourceId}). Patching credentials..."
                         def credPayload = [
                             credentialDetails: [
                                 credentialType: "OAuth2",
@@ -109,26 +108,57 @@ pipeline {
                         ]
                         writeJSON file: 'cred_payload.json', json: credPayload
                         sh "curl -s -X PATCH 'https://api.powerbi.com/v1.0/myorg/gateways/${dsObject.gatewayId}/datasources/${dsObject.datasourceId}' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @cred_payload.json"
-                        echo "✅ Connection fully updated and authenticated."
-                    } else if (dsJson.value.any { it.datasourceType == "AzureDataLakeStorage" }) {
-                        echo "💡 Fabric OneLake source detected. Manual credential patching skipped (automatically handled by Service Principal)."
                     } else {
-                        echo "⚠️ Warning: Could not identify datasource for patching. Proceeding to Refresh stage anyway."
+                        echo "💡 Fabric OneLake/DirectLake source detected. Skipping manual PATCH."
                     }
                 }
             }
         }
 
-        stage('Refresh & Validate') {
+        stage('Refresh & Validate Connection') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "🔄 Triggering Refresh for Model: ${modelId}"
-                    // Using a more robust refresh call
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
-                    echo "✅ Refresh triggered successfully."
+                    echo "🔄 Triggering ENHANCED Refresh for Model: ${modelId}"
+                    
+                    def refreshPayload = [ type: "Full", commitMode: "transactional" ]
+                    writeJSON file: 'refresh_payload.json', json: refreshPayload
+
+                    def refreshHttpCode = sh(script: """
+                        curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes" \
+                        -H "Authorization: Bearer ${env.TOKEN}" \
+                        -H "Content-Type: application/json" \
+                        -d @refresh_payload.json
+                    """, returnStdout: true).trim()
+
+                    if (refreshHttpCode == "202") {
+                        echo "✅ Refresh Accepted. Monitoring for completion..."
+                        
+                        boolean isRefreshing = true
+                        int attempts = 0
+                        while (isRefreshing && attempts < 15) {
+                            sleep 30
+                            def statusResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes", returnStdout: true)
+                            def refreshes = readJSON(text: statusResp).value
+                            
+                            if (refreshes.size() > 0) {
+                                def lastRefresh = refreshes[0]
+                                if (lastRefresh.status == "Completed") {
+                                    echo "🎉 Refresh Successful! Connection is verified and active."
+                                    isRefreshing = false
+                                } else if (lastRefresh.status == "Failed") {
+                                    error "❌ Refresh Failed. This usually means the Connection ID or Credentials are invalid: ${lastRefresh.serviceExceptionJson}"
+                                } else {
+                                    echo "Status: ${lastRefresh.status}... (Attempt ${attempts+1}/15)"
+                                }
+                            }
+                            attempts++
+                        }
+                    } else {
+                        error "❌ Failed to trigger refresh. HTTP Code: ${refreshHttpCode}"
+                    }
                 }
             }
         }
@@ -182,7 +212,7 @@ pipeline {
     
     post {
         always {
-            sh "rm -f model_payload.json report_payload.json definition.pbir bind_payload.json cred_payload.json"
+            sh "rm -f model_payload.json report_payload.json definition.pbir bind_payload.json cred_payload.json refresh_payload.json"
         }
     }
 }
@@ -194,7 +224,7 @@ def fabricPoll(apiUrl, payloadFile) {
     if (opUrl && opUrl != "null") {
         echo "📡 Polling Operation: ${opUrl}"
         int retryCount = 0
-        int maxRetries = 15 // Increased for larger models
+        int maxRetries = 20 
 
         while (retryCount < maxRetries) {
             sleep 20
@@ -209,7 +239,7 @@ def fabricPoll(apiUrl, payloadFile) {
             }
             retryCount++
         }
-        error "❌ Operation timed out after ${maxRetries * 20} seconds."
+        error "❌ Operation timed out."
     } else {
         error "❌ Failed to initiate operation. No Location header found."
     }
