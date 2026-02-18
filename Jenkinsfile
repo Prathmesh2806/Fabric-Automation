@@ -69,23 +69,30 @@ pipeline {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
-
+        
                     echo "👑 Reclaiming Model Ownership for SPN..."
-                    // Power BI API call to ensure SPN is the owner
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
+                    def takeOverStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'", returnStdout: true).trim()
                     
-                    // Crucial: Wait for Fabric metadata to update
+                    if (takeOverStatus != "200") {
+                        error "❌ TakeOver Failed with status ${takeOverStatus}. Is the SPN a Capacity Admin?"
+                    }
+        
                     echo "⏳ Waiting for metadata sync..."
-                    sleep 10
-
+                    sleep 15
+        
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
-                        gatewayObjectId: "00000000-0000-0000-0000-000000000000", // Cloud Connection placeholder
+                        gatewayObjectId: "00000000-0000-0000-0000-000000000000",
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
-
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json"
+        
+                    def bindStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json", returnStdout: true).trim()
+        
+                    if (bindStatus != "200") {
+                        error "❌ Binding Failed with status ${bindStatus}. Ensure the SPN has 'User' permissions on Connection ${env.QA_CONNECTION_ID}."
+                    }
+                    echo "✅ Binding Successful!"
                 }
             }
         }
