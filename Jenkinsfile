@@ -173,19 +173,19 @@ pipeline {
                     sleep 5
 
                     echo "🔗 Binding Connection..."
-
                     def dsPayload = [
                         updateDetails: [[
                             datasourceSelector: [
                                 datasourceType: "AzureDataLakeStorage",
                                 connectionDetails: [
-                                    path: env.LAKEHOUSE_URL
+                                    server: "onelake.dfs.fabric.microsoft.com",
+                                    path: "/${env.WORKSPACE_ID}/${env.LAKEHOUSE_ID}/"
                                 ]
                             ],
                             connectionId: env.QA_CONNECTION_ID
                         ]]
                     ]
-
+                     
                     writeJSON file: 'ds_payload.json', json: dsPayload
 
                     def bindResp = sh(script: """
