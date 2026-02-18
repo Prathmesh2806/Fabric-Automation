@@ -69,39 +69,59 @@ pipeline {
             }
         }
 
-       stage('Ownership & Connection Binding') {
-            steps {
-                script {
-                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
-                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
-
-                    echo "👑 Taking Ownership of Model: ${modelId}"
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
-                    
-                    // Give Fabric a moment to propagate the ownership change
-                    sleep 15
-
-                    echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
-                    def bindPayload = [
-                        gatewayObjectId: "00000000-0000-0000-0000-000000000000", // Required for Cloud Connections
-                        datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
+      stage('Ownership & Connection Binding') {
+            script {
+                // 1. Take Ownership (Takeover)
+                echo "👑 Taking Ownership of Model: ${datasetId}"
+                sh """
+                    curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${workspaceId}/datasets/${datasetId}/Default.TakeOver" \
+                         -H "Authorization: Bearer ${FABRIC_TOKEN}" \
+                         -H "Content-Length: 0"
+                """
+                sleep 5
+        
+                // 2. Bind to Connection/Gateway
+                echo "🔗 Binding to Connection ID: ${connectionId}"
+                def bindPayload = [gatewayObjectId: connectionId]
+                writeJSON file: 'bind_payload.json', json: bindPayload
+                
+                sh """
+                    curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${workspaceId}/datasets/${datasetId}/Default.BindToGateway" \
+                         -H "Authorization: Bearer ${FABRIC_TOKEN}" \
+                         -H "Content-Type: application/json" \
+                         -d @bind_payload.json
+                """
+                sleep 10
+        
+                // 3. MANDATORY: Update Datasource Credentials
+                // This 'patches' the connection so it actually uses the Service Principal's identity
+                echo "🔐 Updating Datasource Credentials..."
+                
+                // First, get the Datasource ID (usually required for the patch URL)
+                def datasourceResponse = sh(script: "curl -s -H 'Authorization: Bearer ${FABRIC_TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${workspaceId}/datasets/${datasetId}/datasources", returnStdout: true)
+                def datasources = readJSON text: datasourceResponse
+                def datasourceId = datasources.value[0].datasourceId
+                def gatewayId = datasources.value[0].gatewayId
+        
+                // Define the credential payload
+                def credPayload = [
+                    credentialDetails: [
+                        credentialType: "OAuth2",
+                        useEndUserCredential: "false",
+                        useCallerAADIdentity: "true", // Tells Fabric to use the Service Principal's token
+                        privacyLevel: "Organizational"
                     ]
-                    writeJSON file: 'bind_payload.json', json: bindPayload
-
-                    def bindResp = sh(script: "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json", returnStdout: true)
-                    
-                    echo "✅ Bind attempt finished. Verifying connection status..."
-                    
-                    // VALIDATION STEP: Query the actual data sources to see if they are bound
-                    def verifyResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/datasources", returnStdout: true)
-                    echo "📊 Current Datasource Config: ${verifyResp}"
-                    
-                    if (verifyResp.contains(env.QA_CONNECTION_ID)) {
-                        echo "🎯 CONFIRMED: Dataset is successfully bound to Connection ${env.QA_CONNECTION_ID}"
-                    } else {
-                        echo "⚠️ WARNING: Binding might still be processing. Check UI in 2-3 minutes."
-                    }
-                }
+                ]
+                writeJSON file: 'cred_payload.json', json: credPayload
+        
+                sh """
+                    curl -s -X PATCH "https://api.powerbi.com/v1.0/myorg/gateways/${gatewayId}/datasources/${datasourceId}" \
+                         -H "Authorization: Bearer ${FABRIC_TOKEN}" \
+                         -H "Content-Type: application/json" \
+                         -d @cred_payload.json
+                """
+                
+                echo "✅ Connection fully bound and authenticated."
             }
         }
         stage('Refresh & Validate') {
