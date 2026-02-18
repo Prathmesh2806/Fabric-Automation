@@ -1,9 +1,6 @@
 expression 'DirectLake - VinayakLakehouse' =
     let
-        Source = AzureStorage.DataLake(
-            "https://onelake.dfs.fabric.microsoft.com/afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6/3c972997-683b-4396-aafa-a3d0f427c5a0/",
-            [HierarchicalNavigation = true]
-        )
+        Source = AzureStorage.DataLake("https://onelake.dfs.fabric.microsoft.com/afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6/3c972997-683b-4396-aafa-a3d0f427c5a0/", [HierarchicalNavigation=true])
     in
         Source
 lineageTag: e89de296-30e9-4b2e-af5a-f08c9cacea76
