@@ -6,14 +6,14 @@ pipeline {
         CLIENT_SECRET    = credentials('fabric-client-secret')
         TENANT_ID        = credentials('fabric-tenant-id')
 
-        WORKSPACE_ID     = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
+        WORKSPACE_ID      = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
         SEMANTIC_MODEL_ID = "5bd5e7ae-95ff-4251-8fd3-f6d14fa8439c"
 
-        REPORT_NAME      = "Sales_Report_A"
-        DATASET_NAME     = "Sales_Model_A"
+        REPORT_NAME   = "Sales_Report_A"
+        DATASET_NAME  = "Sales_Model_A"
 
-        MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
-        REPORT_FOLDER    = "Customer-A/Sales_Report_A.Report"
+        MODEL_FOLDER  = "Customer-A/Sales_Model_A.SemanticModel"
+        REPORT_FOLDER = "Customer-A/Sales_Report_A.Report"
 
         QA_CONNECTION_ID = "7d3a6d82-0f86-42b0-9c98-84610e10ff95"
     }
@@ -55,7 +55,7 @@ pipeline {
                     def lakehouse = readJSON(text: itemsResp).value.find { it.type == "Lakehouse" }
                     if (!lakehouse) error "❌ No Lakehouse found!"
 
-                    env.LAKEHOUSE_ID = lakehouse.id
+                    env.LAKEHOUSE_ID  = lakehouse.id
                     env.LAKEHOUSE_URL = "https://onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.LAKEHOUSE_ID}/"
                 }
             }
@@ -67,9 +67,8 @@ pipeline {
 
                     sh """
                         FILE_PATH="${env.MODEL_FOLDER}/definition/expressions.tmdl"
-                        NEW_VAL="onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.LAKEHOUSE_ID}"
-                        sed -i "s|onelake.dfs.fabric.microsoft.com/[^\\\"]*|\$NEW_VAL|g" \$FILE_PATH
-                        sed -i 's/expression EnvironmentName = .*/expression EnvironmentName = "QA"/' \$FILE_PATH
+                        sed -i 's|https://onelake.dfs.fabric.microsoft.com/.*"|${env.LAKEHOUSE_URL}"|g' \$FILE_PATH
+                        sed -i 's/expression EnvironmentName = "DEV"/expression EnvironmentName = "QA"/g' \$FILE_PATH
                     """
 
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
@@ -176,28 +175,28 @@ pipeline {
                     echo "🔗 Binding Connection..."
 
                     def dsPayload = [
-                        updateDetails: [
-                            [
-                                datasourceSelector: [
-                                    datasourceType: "AzureDataLakeStorage",
-                                    connectionDetails: [
-                                        url: env.LAKEHOUSE_URL
-                                    ]
-                                ],
-                                connectionId: env.QA_CONNECTION_ID
-                            ]
-                        ]
+                        updateDetails: [[
+                            datasourceSelector: [
+                                datasourceType: "AzureDataLakeStorage",
+                                connectionDetails: [
+                                    path: env.LAKEHOUSE_URL
+                                ]
+                            ],
+                            connectionId: env.QA_CONNECTION_ID
+                        ]]
                     ]
 
                     writeJSON file: 'ds_payload.json', json: dsPayload
 
-                    sh """
+                    def bindResp = sh(script: """
                     curl -s -X POST \
                     https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${env.SEMANTIC_MODEL_ID}/Default.UpdateDatasources \
                     -H "Authorization: Bearer ${env.TOKEN}" \
                     -H "Content-Type: application/json" \
                     -d @ds_payload.json
-                    """
+                    """, returnStdout: true)
+
+                    echo "Bind Response: ${bindResp}"
 
                     echo "🔄 Refreshing..."
 
@@ -219,5 +218,4 @@ pipeline {
         }
     }
 }
-
  
