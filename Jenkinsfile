@@ -35,11 +35,11 @@ pipeline {
                     """, returnStdout: true)
                     env.TOKEN = readJSON(text: tokenResponse).access_token
 
-                    // Verify Capacity Health to avoid "Premium capacity connection health issue"
-                    echo "🔍 Checking Capacity Health..."
+                    // Verify Capacity Health
+                    echo "🔍 Verifying Capacity Status..."
                     def capCheck = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/capacities", returnStdout: true)
                     if (capCheck.contains("Paused") || capCheck.contains("Inactive")) {
-                        error "❌ Capacity is PAUSED or INACTIVE. Please resume it in Azure Portal."
+                        error "❌ Capacity is PAUSED. Please resume it in the Azure Portal."
                     }
                     echo "✅ Capacity is Active."
                 }
@@ -52,7 +52,7 @@ pipeline {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
-                    // Prepare Multipart Definition
+                    // Build Multipart Payload
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
                     def parts = [[path: "definition.pbism", payload: pbismBase64, payloadType: "InlineBase64"]]
                     
@@ -81,47 +81,31 @@ pipeline {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "👑 Taking Ownership for SPN: ${env.SPN_OBJECT_ID}"
-                    def takeOverStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'", returnStdout: true).trim()
+                    echo "👑 Taking Ownership of Model: ${modelId}"
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
                     
-                    if (takeOverStatus != "200") {
-                        error "❌ TakeOver Failed (Status: ${takeOverStatus}). Ensure SPN is a Capacity Admin."
-                    }
+                    sleep 10
 
-                    echo "⏳ Syncing metadata (15s)..."
-                    sleep 15
-
-                    echo "🔗 Binding to Connection: ${env.QA_CONNECTION_ID}"
+                    echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
                         gatewayObjectId: "00000000-0000-0000-0000-000000000000",
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
 
-                    def bindStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json", returnStdout: true).trim()
-
-                    if (bindStatus != "200") {
-                        error "❌ Binding Failed (Status: ${bindStatus}). Ensure SPN is a 'User' on the connection."
-                    }
-                    echo "✅ Binding Successful!"
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.BindToGateway' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d @bind_payload.json"
                 }
             }
         }
 
-        stage('Refresh Semantic Model') {
+        stage('Refresh & Validate') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
                     echo "🔄 Triggering Refresh..."
-                    def refreshStatus = sh(script: "curl -s -o /dev/null -w '%{http_code}' -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'", returnStdout: true).trim()
-                    
-                    if (refreshStatus == "202" || refreshStatus == "200") {
-                        echo "✅ Refresh Triggered!"
-                    } else {
-                        error "❌ Refresh Failed (Status: ${refreshStatus})."
-                    }
+                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
                 }
             }
         }
@@ -182,23 +166,35 @@ def fabricPoll(apiUrl, payloadFile) {
 
     if (opUrl && opUrl != "null") {
         echo "📡 Polling Operation: ${opUrl}"
-        while (true) {
+        int retryCount = 0
+        int maxRetries = 3 
+
+        while (retryCount < maxRetries) {
             sleep 25
             def statusRaw = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' ${opUrl}", returnStdout: true)
             def statusJson = readJSON text: statusRaw
             
             if (statusJson.status == "Succeeded") {
                 echo "✅ Operation Success!"
-                break
+                return 
             } else if (statusJson.status == "Failed") {
-                // Retry if it's a transient health issue
-                if (statusRaw.contains("health issue") || statusRaw.contains("Conflict")) {
-                    echo "⚠️ Capacity busy. Retrying in 30s..."
+                // If the error is a Capacity Health Issue, it usually means the Service Principal is not a Capacity Admin
+                if (statusRaw.contains("Premium capacity connection health issue")) {
+                    error "❌ Capacity Error: Your Service Principal likely lacks 'Capacity Admin' permissions. Detailed error: ${statusRaw}"
+                }
+                
+                // Retry only for transient busy errors
+                if (statusRaw.contains("Conflict") || statusRaw.contains("TooManyRequests")) {
+                    echo "⚠️ System busy (Retry ${retryCount + 1}/${maxRetries})..."
+                    retryCount++
                     sleep 30
                     continue
                 }
-                error "❌ Fabric API Error: ${statusRaw}"
+                error "❌ Fabric API Failure: ${statusRaw}"
             }
         }
+        error "❌ Operation timed out after ${maxRetries} retries."
+    } else {
+        error "❌ Failed to initiate operation. No Location header found."
     }
 }
