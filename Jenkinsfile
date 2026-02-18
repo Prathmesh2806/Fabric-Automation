@@ -10,9 +10,10 @@ pipeline {
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
-        // The GUID for your Cloud Connection
+        // Your specific SPN Object ID
+        SPN_OBJECT_ID    = "305540ff-40c9-437a-8a40-685541a45e00"
+        
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
-
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
         REPORT_FOLDER    = "Customer-A/Sales_Report_A.Report"
     }
@@ -63,18 +64,23 @@ pipeline {
             }
         }
 
-        stage('TakeOver & Bind Connection') {
+        stage('Ownership & Connection Binding') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "👑 SPN taking ownership..."
+                    echo "👑 Reclaiming Model Ownership for SPN..."
+                    // Power BI API call to ensure SPN is the owner
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
+                    
+                    // Crucial: Wait for Fabric metadata to update
+                    echo "⏳ Waiting for metadata sync..."
+                    sleep 10
 
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
-                        gatewayObjectId: "00000000-0000-0000-0000-000000000000",
+                        gatewayObjectId: "00000000-0000-0000-0000-000000000000", // Cloud Connection placeholder
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
@@ -84,15 +90,20 @@ pipeline {
             }
         }
 
-        stage('Validate Connection (Refresh)') {
+        stage('Refresh & Validate') {
             steps {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
 
-                    echo "🔄 Triggering Refresh..."
-                    sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
-                    echo "✅ Refresh Triggered Successfully."
+                    echo "🔄 Triggering Refresh for Active Capacity..."
+                    def refreshResp = sh(script: "curl -s -w '%{http_code}' -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'", returnStdout: true)
+                    
+                    if (refreshResp.contains("202") || refreshResp.contains("200")) {
+                        echo "✅ Refresh Triggered Successfully."
+                    } else {
+                        error "❌ Refresh Failed with status: ${refreshResp}. Check if Capacity Admin is set for Object ID: ${env.SPN_OBJECT_ID}"
+                    }
                 }
             }
         }
@@ -104,7 +115,6 @@ pipeline {
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
                     def existingReport = readJSON(text: itemsResp).value.find { it.displayName == env.REPORT_NAME }
 
-                    // Updated definition.pbir with all required properties to fix "FailedToParseFile"
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
