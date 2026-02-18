@@ -79,7 +79,17 @@ pipeline {
                 script {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def itemsJson = readJSON text: itemsResp
-                    def modelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
+                    
+                    // GUID Format Fix: trim() vaprun space kadhli aahe
+                    def rawModelId = itemsJson.value.find { it.displayName == env.MODEL_NAME }?.id
+                    def modelId = rawModelId ? rawModelId.trim() : null
+                    
+                    if (!modelId || modelId == "null") {
+                        error "❌ Cannot proceed: Model ID for '${env.MODEL_NAME}' is null or invalid. This causes FormatException."
+                    }
+                    
+                    echo "✅ Using Model ID: ${modelId}"
+
                     def existingReport = itemsJson.value.find { it.displayName == env.REPORT_NAME }
 
                     // PBIR Definition
@@ -87,9 +97,6 @@ pipeline {
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
-                                "connectionString": null,
-                                "pbiServiceModelId": null,
-                                "pbiModelVirtualServerName": null,
                                 "pbiModelDatabaseName": "${modelId}",
                                 "name": "EntityDataSource",
                                 "connectionType": "pbiServiceXml"
@@ -98,7 +105,6 @@ pipeline {
                     }"""
                     writeFile file: 'definition.pbir', text: pbirJson
                     
-                    // Encode files separately to avoid line-break issues in the Map definition
                     def reportBase64 = sh(script: "base64 -w 0 ${env.REPORT_FOLDER}/report.json", returnStdout: true).trim()
                     def pbirBase64 = sh(script: "base64 -w 0 definition.pbir", returnStdout: true).trim()
 
@@ -119,6 +125,23 @@ pipeline {
                         "https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items"
                     
                     fabricPoll(apiUrl, 'report_payload.json')
+                }
+            }
+        }
+
+        stage('Refresh Semantic Model') {
+            steps {
+                script {
+                    echo "🔄 Triggering Refresh..."
+                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
+                    def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
+                    
+                    if (modelId) {
+                        sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId.trim()}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -d '{\"type\": \"Full\"}'"
+                        echo "✅ Refresh successfully triggered for Model ID: ${modelId}"
+                    } else {
+                        echo "⚠️ Model ID not found, skipping refresh."
+                    }
                 }
             }
         }
