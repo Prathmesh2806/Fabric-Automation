@@ -47,19 +47,26 @@ pipeline {
         stage('Deploy Semantic Model') {
             steps {
                 script {
-                    echo "🛠️ Patching TMDL for QA Environment..."
+                    // 1. DYNAMIC DISCOVERY: Find the Lakehouse ID in the target workspace
+                    echo "🔍 Finding QA Lakehouse ID in Workspace..."
+                    def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
+                    def lakehouse = readJSON(text: itemsResp).value.find { it.type == "Lakehouse" } // Finds the first/only lakehouse
+                    
+                    if (!lakehouse) {
+                        error "❌ No Lakehouse found in Workspace ${env.WORKSPACE_ID}. Deployment cannot proceed."
+                    }
+                    
+                    env.ACTUAL_LAKEHOUSE_ID = lakehouse.id
+                    echo "✅ Found Lakehouse: ${lakehouse.displayName} (${env.ACTUAL_LAKEHOUSE_ID})"
+        
+                    // 2. PATCHING
+                    echo "🛠️ Patching TMDL with Verified IDs..."
                     sh """
-                        # 1. Target the URL but preserve everything after the Lakehouse ID
-                        # We use a backreference to keep the original ending of the line
-                        sed -i 's|onelake.dfs.fabric.microsoft.com/[a-f0-9-]*/[a-f0-9-]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.QA_LAKEHOUSE_ID}|g' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
+                        # Replace the URL using the discovered Lakehouse ID to ensure consistency
+                        sed -i 's|onelake.dfs.fabric.microsoft.com/[^/]*/[^/]*|onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.ACTUAL_LAKEHOUSE_ID}|g' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
                         
-                        # 2. Update Environment Parameter (using a safer match)
+                        # Ensure Environment is QA
                         sed -i 's/expression EnvironmentName = .*/expression EnvironmentName = "QA"/' "${env.MODEL_FOLDER}/definition/expressions.tmdl"
-                        
-                        # 3. VERIFICATION (Look closely at the output in Jenkins)
-                        echo "--- VERIFYING PATCHED TMDL LINE ---"
-                        grep "Source =" "${env.MODEL_FOLDER}/definition/expressions.tmdl"
-                        echo "----------------------------------"
                     """
                     // 2. Build Payload
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
