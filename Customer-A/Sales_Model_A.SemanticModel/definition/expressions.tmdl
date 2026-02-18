@@ -1,24 +1,19 @@
 expression 'DirectLake - VinayakLakehouse' =
-    let
-        Source = AzureStorage.DataLake("https://onelake.dfs.fabric.microsoft.com/afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6/3c972997-683b-4396-aafa-a3d0f427c5a0/", [HierarchicalNavigation=true])
-    in
-        Source
-    meta [IsParameterQuery = false]
-    lineageTag: e89de296-30e9-4b2e-af5a-f08c9cacea76
+    let
+        Source = AzureStorage.DataLake("https://onelake.dfs.fabric.microsoft.com/afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6/3c972997-683b-4396-aafa-a3d0f427c5a0/", [HierarchicalNavigation=true])
+    in
+        Source
+  lineageTag: e89de296-30e9-4b2e-af5a-f08c9cacea76
 
-annotation PBI_IncludeFutureArtifacts = False
+  annotation PBI_IncludeFutureArtifacts = False
 
+expression EnvironmentName = "QA" meta [IsParameterQuery = true, IsParameterQueryRequired = false, Type = type text]
+  lineageTag: fefe80d0-9c15-4ee6-9eb8-807ee631bb05
 
-expression EnvironmentName = "QA"
-    meta [IsParameterQuery = true, IsParameterQueryRequired = false, Type = type text]
-    lineageTag: fefe80d0-9c15-4ee6-9eb8-807ee631bb05
+  annotation PBI_ResultType = Text
 
-annotation PBI_ResultType = Text
+expression CustomerName = "A" meta [IsParameterQuery = true, IsParameterQueryRequired = false, Type = type text]
+  lineageTag: 4a2ddc28-6df5-4a91-8ac1-c647c45e03ad
 
-
-expression CustomerName = "A"
-    meta [IsParameterQuery = true, IsParameterQueryRequired = false, Type = type text]
-    lineageTag: 4a2ddc28-6df5-4a91-8ac1-c647c45e03ad
-
-annotation PBI_ResultType = Text
+  annotation PBI_ResultType = Text
  
