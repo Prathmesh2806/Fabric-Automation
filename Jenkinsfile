@@ -75,27 +75,37 @@ pipeline {
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${env.SEMANTIC_MODEL_ID}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
                     
                     sleep 10
-
+        
                     echo "🔗 Binding Connection & Updating Datasources..."
-                    // This is the CRITICAL fix to solve the mapping/access error
+                    // CRITICAL FIX: The structure must include 'connectionDetails' object
                     def updateDsPayload = [
-                        updateDetails: [[
-                            datasourceSelector: [
-                                datasourceType: "AzureDataLakeStorage",
-                                connectionDetails: [ url: "${env.LAKEHOUSE_URL}" ]
-                            ],
-                            connectionId: "${env.QA_CONNECTION_ID}"
-                        ]]
+                        updateDetails: [
+                            [
+                                datasourceSelector: [
+                                    datasourceType: "AzureDataLakeStorage",
+                                    connectionDetails: [ 
+                                        url: "https://onelake.dfs.fabric.microsoft.com/${env.WORKSPACE_ID}/${env.LAKEHOUSE_ID}/" 
+                                    ]
+                                ],
+                                connectionId: "${env.QA_CONNECTION_ID}"
+                            ]
+                        ]
                     ]
                     writeJSON file: 'ds_payload.json', json: updateDsPayload
                     
+                    // Added -f to curl so it fails the build if the API returns 400/500
                     sh """
-                        curl -s -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${env.SEMANTIC_MODEL_ID}/Default.UpdateDatasources" \
+                        response=\$(curl -s -w "%{http_code}" -X POST "https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${env.SEMANTIC_MODEL_ID}/Default.UpdateDatasources" \
                         -H "Authorization: Bearer ${env.TOKEN}" \
                         -H "Content-Type: application/json" \
-                        -d @ds_payload.json
+                        -d @ds_payload.json)
+                        
+                        if [[ "\$response" != *"200"* ]]; then
+                            echo "❌ API Error Response: \$response"
+                            exit 1
+                        fi
                     """
-
+        
                     echo "🔄 Triggering Refresh..."
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${env.SEMANTIC_MODEL_ID}/refreshes' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Type: application/json' -d '{\"type\": \"Full\"}'"
                 }
