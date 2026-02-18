@@ -2,17 +2,14 @@ pipeline {
     agent any
 
     environment {
-        // Credentials IDs from Jenkins Global Credentials
         CLIENT_ID        = credentials('fabric-client-id')
         CLIENT_SECRET    = credentials('fabric-client-secret')
         TENANT_ID        = credentials('fabric-tenant-id')
         
-        // Configuration
         WORKSPACE_ID     = "afc6fad2-d19f-4f1b-bc5a-eb5f2caf40e6"
-        MODEL_NAME       = "Sales_Model_A"
-        REPORT_NAME      = "Sales_Report_A"
+        MODEL_NAME        = "Sales_Model_A"
+        REPORT_NAME       = "Sales_Report_A"
         
-        // Connection Info
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
         REPORT_FOLDER    = "Customer-A/Sales_Report_A.Report"
@@ -34,7 +31,7 @@ pipeline {
                     echo "🔍 Verifying Capacity Status..."
                     def capCheck = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/capacities", returnStdout: true)
                     if (capCheck.contains("Paused") || capCheck.contains("Inactive")) {
-                        error "❌ Capacity is PAUSED. Please resume it in the Azure Portal."
+                        error "❌ Capacity is PAUSED."
                     }
                     echo "✅ Capacity is Active."
                 }
@@ -72,8 +69,10 @@ pipeline {
        stage('Ownership & Connection Binding') {
             steps {
                 script {
+                    // 1. Get Model ID
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
+                    if (!modelId) error "❌ Could not find Model ID for ${env.MODEL_NAME}"
 
                     echo "👑 Taking Ownership of Model: ${modelId}"
                     sh "curl -s -X POST 'https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/Default.TakeOver' -H 'Authorization: Bearer ${env.TOKEN}' -H 'Content-Length: 0'"
@@ -82,7 +81,7 @@ pipeline {
 
                     echo "🔗 Binding to Connection ID: ${env.QA_CONNECTION_ID}"
                     def bindPayload = [
-                        gatewayObjectId: "00000000-0000-0000-0000-000000000000",
+                        gatewayObjectId: "00000000-0000-0000-0000-000000000000", // Required for Cloud Connections
                         datasourceObjectIds: ["${env.QA_CONNECTION_ID}"]
                     ]
                     writeJSON file: 'bind_payload.json', json: bindPayload
@@ -90,35 +89,40 @@ pipeline {
                     
                     sleep 5
 
-                    // --- NEW LOGIC TO FIX "UNDEFINED" CONNECTION ---
-                    echo "🔐 Updating Cloud Connection Credentials..."
-                    
-                    // 1. Get the dynamic datasource and gateway IDs for this dataset
+                    echo "🔐 Fetching Dynamic Gateway/Datasource IDs..."
                     def dsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/groups/${env.WORKSPACE_ID}/datasets/${modelId}/datasources", returnStdout: true)
                     def dsJson = readJSON text: dsResp
                     
-                    // We target the first datasource in the model
-                    def targetDsId = dsJson.value[0].datasourceId
-                    def targetGwId = dsJson.value[0].gatewayId
+                    // Logic to find the correct datasource object
+                    def dsObject = dsJson.value.find { it.datasourceId != null }
+                    
+                    if (dsObject && dsObject.datasourceId && dsObject.gatewayId) {
+                        def targetDsId = dsObject.datasourceId
+                        def targetGwId = dsObject.gatewayId
+                        
+                        echo "🎯 Target Gateway: ${targetGwId}"
+                        echo "🎯 Target Datasource: ${targetDsId}"
 
-                    // 2. Patch the credentials to use the Service Principal Identity
-                    def credPayload = [
-                        credentialDetails: [
-                            credentialType: "OAuth2",
-                            useEndUserCredential: false,
-                            useCallerAADIdentity: true, 
-                            privacyLevel: "Organizational"
+                        def credPayload = [
+                            credentialDetails: [
+                                credentialType: "OAuth2",
+                                useEndUserCredential: false,
+                                useCallerAADIdentity: true, 
+                                privacyLevel: "Organizational"
+                            ]
                         ]
-                    ]
-                    writeJSON file: 'cred_payload.json', json: credPayload
+                        writeJSON file: 'cred_payload.json', json: credPayload
 
-                    sh """
-                        curl -s -X PATCH "https://api.powerbi.com/v1.0/myorg/gateways/${targetGwId}/datasources/${targetDsId}" \
-                        -H "Authorization: Bearer ${env.TOKEN}" \
-                        -H "Content-Type: application/json" \
-                        -d @cred_payload.json
-                    """
-                    echo "✅ Connection fully updated and authenticated."
+                        sh """
+                            curl -s -X PATCH "https://api.powerbi.com/v1.0/myorg/gateways/${targetGwId}/datasources/${targetDsId}" \
+                            -H "Authorization: Bearer ${env.TOKEN}" \
+                            -H "Content-Type: application/json" \
+                            -d @cred_payload.json
+                        """
+                        echo "✅ Connection fully updated and authenticated."
+                    } else {
+                        error "❌ Failed to retrieve valid Gateway/Datasource IDs. Response: ${dsResp}"
+                    }
                 }
             }
         }
@@ -196,7 +200,7 @@ def fabricPoll(apiUrl, payloadFile) {
     if (opUrl && opUrl != "null") {
         echo "📡 Polling Operation: ${opUrl}"
         int retryCount = 0
-        int maxRetries = 5 
+        int maxRetries = 10 
 
         while (retryCount < maxRetries) {
             sleep 20
