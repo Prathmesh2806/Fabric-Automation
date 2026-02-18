@@ -12,9 +12,6 @@ pipeline {
         MODEL_NAME       = "Sales_Model_A"
         REPORT_NAME      = "Sales_Report_A"
         
-        // Your SPN Object ID for ownership
-        SPN_OBJECT_ID    = "305540ff-40c9-437a-8a40-685541a45e00"
-        
         // Connection Info
         QA_CONNECTION_ID = "58d9731f-fa5f-419a-8619-1e987b11a916"
         MODEL_FOLDER     = "Customer-A/Sales_Model_A.SemanticModel"
@@ -25,7 +22,6 @@ pipeline {
         stage('Auth & Capacity Check') {
             steps {
                 script {
-                    // Get Access Token
                     def tokenResponse = sh(script: """
                         curl -s -X POST https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token \
                         -d grant_type=client_credentials \
@@ -35,7 +31,6 @@ pipeline {
                     """, returnStdout: true)
                     env.TOKEN = readJSON(text: tokenResponse).access_token
 
-                    // Verify Capacity Health
                     echo "🔍 Verifying Capacity Status..."
                     def capCheck = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.powerbi.com/v1.0/myorg/capacities", returnStdout: true)
                     if (capCheck.contains("Paused") || capCheck.contains("Inactive")) {
@@ -52,7 +47,6 @@ pipeline {
                     def itemsResp = sh(script: "curl -s -H 'Authorization: Bearer ${env.TOKEN}' https://api.fabric.microsoft.com/v1/workspaces/${env.WORKSPACE_ID}/items", returnStdout: true)
                     def existingModel = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME && it.type == "SemanticModel" }
 
-                    // Build Multipart Payload
                     def pbismBase64 = sh(script: "base64 -w 0 ${env.MODEL_FOLDER}/definition.pbism", returnStdout: true).trim()
                     def parts = [[path: "definition.pbism", payload: pbismBase64, payloadType: "InlineBase64"]]
                     
@@ -117,11 +111,16 @@ pipeline {
                     def modelId = readJSON(text: itemsResp).value.find { it.displayName == env.MODEL_NAME }?.id
                     def existingReport = readJSON(text: itemsResp).value.find { it.displayName == env.REPORT_NAME }
 
+                    // FIXED: PBIR JSON schema now includes all mandatory connection fields
                     def pbirJson = """{
                         "version": "1.0",
                         "datasetReference": {
                             "byConnection": {
+                                "connectionString": null,
+                                "pbiServiceModelId": null,
+                                "pbiModelVirtualServerName": "sobe_wowvirtualserver",
                                 "pbiModelDatabaseName": "${modelId}",
+                                "name": "EntityDataSource",
                                 "connectionType": "pbiServiceXml"
                             }
                         }
@@ -178,12 +177,6 @@ def fabricPoll(apiUrl, payloadFile) {
                 echo "✅ Operation Success!"
                 return 
             } else if (statusJson.status == "Failed") {
-                // If the error is a Capacity Health Issue, it usually means the Service Principal is not a Capacity Admin
-                if (statusRaw.contains("Premium capacity connection health issue")) {
-                    error "❌ Capacity Error: Your Service Principal likely lacks 'Capacity Admin' permissions. Detailed error: ${statusRaw}"
-                }
-                
-                // Retry only for transient busy errors
                 if (statusRaw.contains("Conflict") || statusRaw.contains("TooManyRequests")) {
                     echo "⚠️ System busy (Retry ${retryCount + 1}/${maxRetries})..."
                     retryCount++
